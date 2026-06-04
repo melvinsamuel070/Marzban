@@ -133,8 +133,12 @@ jobs:
 
       - name: Terraform Init & Apply
         env:
-          # Automatically satisfies the var.key_name prompt hands-free
+          # Satisfies the interactive prompt roadblock
           TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }} 
+          # PROVIDES SECURITY ACCESS KEYS TO AWS NATIVELY
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_KEY_NAME }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
         run: |
           cd terraform-ec2/ 
           terraform init
