@@ -18,6 +18,8 @@ RUN python3 -m pip install --upgrade pip setuptools \
 FROM python:$PYTHON_VERSION-slim
 
 ENV PYTHONUNBUFFERED=1
+# Force Python to read packages from the directory we copied everything into
+ENV PYTHONPATH=/usr/local/lib/python3.12/site-packages
 ENV PYTHON_LIB_PATH=/usr/local/lib/python3.12/site-packages
 WORKDIR /code
 
@@ -29,9 +31,9 @@ COPY --from=build /usr/local/share/xray /usr/local/share/xray
 
 COPY . /code
 
-# Install setuptools in the final stage so pkg_resources is available for Python 3.12+
+# We force pip to install setuptools globally for all users, or fallback safely
 RUN python3 -m pip install --upgrade pip \
-    && pip install --no-cache-dir setuptools \
+    && python3 -m pip install --no-cache-dir --break-system-packages setuptools \
     && ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
     && marzban-cli completion install --shell bash
