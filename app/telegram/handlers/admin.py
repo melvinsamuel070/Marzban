@@ -1048,7 +1048,8 @@ def add_user_from_template_username_step(message: types.Message):
             wait_msg = bot.send_message(
                 message.chat.id,
                 f"❌ Username can't be generated because is shorter than 32 characters! username: <code>{username}</code>",
-                parse_mode="HTML")
+                parse_mode="HTML"
+                )
             schedule_delete_message(message.chat.id, wait_msg.message_id, message.message_id)
             return bot.register_next_step_handler(wait_msg, add_user_from_template_username_step)
         elif len(username) > 32:
