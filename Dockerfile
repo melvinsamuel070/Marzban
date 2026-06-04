@@ -17,7 +17,8 @@ RUN python3 -m pip install --upgrade pip setuptools \
 
 FROM python:$PYTHON_VERSION-slim
 
-ENV PYTHON_LIB_PATH=/usr/local/lib/python${PYTHON_VERSION%.*}/site-packages
+ENV PYTHONUNBUFFERED=1
+ENV PYTHON_LIB_PATH=/usr/local/lib/python3.12/site-packages
 WORKDIR /code
 
 RUN rm -rf $PYTHON_LIB_PATH/*
@@ -28,7 +29,10 @@ COPY --from=build /usr/local/share/xray /usr/local/share/xray
 
 COPY . /code
 
-RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
+# Install setuptools in the final stage so pkg_resources is available for Python 3.12+
+RUN python3 -m pip install --upgrade pip \
+    && pip install --no-cache-dir setuptools \
+    && ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
     && marzban-cli completion install --shell bash
 
