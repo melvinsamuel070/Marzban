@@ -1951,6 +1951,7 @@ def confirm_user_command(call: types.CallbackQuery):
                     os.remove(file_name)
                 except ApiTelegramException:
                     pass
+
     elif data == 'add_data':
         schedule_delete_message(
             call.message.chat.id,
@@ -1973,17 +1974,18 @@ def confirm_user_command(call: types.CallbackQuery):
 \t{readable_size(user.used_traffic) if user.used_traffic else 0}\
 /{readable_size(user.data_limit) if user.data_limit else "Unlimited"}\
 \t{user.status}\n')
-                   except sqlalchemy.exc.IntegrityError:
-                db.rollback()
+                    except sqlalchemy.exc.IntegrityError:
+                        db.rollback()
+            
             cleanup_messages(chat_id)
             
-            # Fixed the multi-line f-string here:
             bot.send_message(
                 chat_id,
                 f'✅ <b>{counter}/{len(users)} Users</b> Data Limit according to <code>{"+" if data_limit > 0 else "-"}{readable_size(abs(data_limit))}</code>',
-                parse_mode='HTML'
+                parse_mode='HTML',
+                reply_markup=BotKeyboard.main_menu()
             )
-                reply_markup=BotKeyboard.main_menu())
+            
             if TELEGRAM_LOGGER_CHANNEL_ID:
                 text = f"""\
 📶 <b>#Traffic_Change #From_Bot</b>
@@ -2047,6 +2049,7 @@ def confirm_user_command(call: types.CallbackQuery):
                     os.remove(file_name)
                 except ApiTelegramException:
                     pass
+
     elif data in ['inbound_add', 'inbound_remove']:
         bot.edit_message_text(
             '⏳ <b>In Progress...</b>',
