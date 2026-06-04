@@ -20,11 +20,14 @@ FROM python:$PYTHON_VERSION-slim
 ENV PYTHONUNBUFFERED=1
 WORKDIR /code
 
-# Copy the user installation directory directly to match global paths safely
+# 1. Copy your application dependencies
 COPY --from=build /root/.local /root/.local
+
+# 2. Copy the actual Xray core binary executable and asset files
+COPY --from=build /usr/local/bin/xray /usr/local/bin/xray
 COPY --from=build /usr/local/share/xray /usr/local/share/xray
 
-# Bind the user binary paths to the runtime path environment
+# Bind user binary paths to the runtime path environment
 ENV PATH=/root/.local/bin:$PATH
 
 COPY . /code
