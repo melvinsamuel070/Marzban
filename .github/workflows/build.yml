@@ -133,7 +133,7 @@ jobs:
 
       - name: Terraform Init & Apply
         run: |
-          cd terraform/ 
+          cd terraform-ec2/ 
           terraform init
           terraform apply -auto-approve
           
