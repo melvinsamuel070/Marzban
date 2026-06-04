@@ -194,7 +194,7 @@ _connecting_nodes = {}
 
 @threaded_function
 def connect_node(node_id, config=None):
-    global _connecting_nodes
+    # global _connecting_nodes
 
     if _connecting_nodes.get(node_id):
         return

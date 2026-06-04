@@ -728,8 +728,7 @@ def genqr_command(call: types.CallbackQuery):
             expiry_date = datetime.fromtimestamp(user.expire).date() if user.expire else "Never"
             time_left = time_to_string(datetime.fromtimestamp(user.expire)) if user.expire else "-"
             if user.status == UserStatus.on_hold:
-                expiry_text = f"⏰ <b>On Hold Duration:</b> <code>{on_hold_duration} days</code> (auto start at <code>{
-                    on_hold_timeout}</code>)"
+                expiry_text = f"⏰ <b>On Hold Duration:</b> <code>{on_hold_duration} days</code>"
             else:
                 expiry_text = f"📅 <b>Expiry Date:</b> <code>{expiry_date}</code> ({time_left})"
             text = f"""\
