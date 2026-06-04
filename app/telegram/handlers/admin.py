@@ -1016,7 +1016,6 @@ def random_username(call: types.CallbackQuery):
                     data_limit=template.data_limit,
                     expire_date=expire_date,))
 
-
 def add_user_from_template_username_step(message: types.Message):
     template_id = mem_store.get(f"{message.chat.id}:template_id")
     if template_id is None:
@@ -1047,16 +1046,16 @@ def add_user_from_template_username_step(message: types.Message):
         if len(username) < 3:
             wait_msg = bot.send_message(
                 message.chat.id,
-                f"❌ Username can't be generated because is shorter than 32 characters! username: <code>{username}</code>",
+                f"❌ Username can't be generated because it is shorter than 3 characters! username: <code>{username}</code>",
                 parse_mode="HTML"
             )
             schedule_delete_message(message.chat.id, wait_msg.message_id, message.message_id)
             return bot.register_next_step_handler(wait_msg, add_user_from_template_username_step)
+
         elif len(username) > 32:
-            if len(username) > 32:
             wait_msg = bot.send_message(
                 message.chat.id,
-                f"❌ Username can't be generated because is longer than 32 characters! username: <code>{username}</code>",
+                f"❌ Username can't be generated because it is longer than 32 characters! username: <code>{username}</code>",
                 parse_mode="HTML"
             )
             schedule_delete_message(message.chat.id, wait_msg.message_id, message.message_id)
@@ -1066,7 +1065,9 @@ def add_user_from_template_username_step(message: types.Message):
             wait_msg = bot.send_message(message.chat.id, '❌ Username already exists.')
             schedule_delete_message(message.chat.id, wait_msg.message_id, message.message_id)
             return bot.register_next_step_handler(wait_msg, add_user_from_template_username_step)
+            
         template = UserTemplateResponse.model_validate(template)
+
     mem_store.set(f"{message.chat.id}:username", username)
     mem_store.set(f"{message.chat.id}:data_limit", template.data_limit)
     mem_store.set(f"{message.chat.id}:protocols", template.inbounds)
@@ -1107,7 +1108,6 @@ def add_user_from_template_username_step(message: types.Message):
                     username=username,
                     data_limit=template.data_limit,
                     expire_date=expire_date,))
-
 
 @bot.callback_query_handler(cb_query_equals('add_bulk_user'), is_admin=True)
 @bot.callback_query_handler(cb_query_equals('add_user'), is_admin=True)
