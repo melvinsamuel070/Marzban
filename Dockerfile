@@ -12,29 +12,22 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ./requirements.txt /code/
-RUN python3 -m pip install --upgrade pip setuptools \
+RUN python3 -m pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 FROM python:$PYTHON_VERSION-slim
 
 ENV PYTHONUNBUFFERED=1
-# Force Python to read packages from the directory we copied everything into
-ENV PYTHONPATH=/usr/local/lib/python3.12/site-packages
-ENV PYTHON_LIB_PATH=/usr/local/lib/python3.12/site-packages
 WORKDIR /code
 
-RUN rm -rf $PYTHON_LIB_PATH/*
-
-COPY --from=build $PYTHON_LIB_PATH $PYTHON_LIB_PATH
-COPY --from=build /usr/local/bin /usr/local/bin
+# Copy the completely compiled python environment directly over the runtime system files
+COPY --from=build /usr/local /usr/local
 COPY --from=build /usr/local/share/xray /usr/local/share/xray
 
 COPY . /code
 
-# We force pip to install setuptools globally for all users, or fallback safely
-RUN python3 -m pip install --upgrade pip \
-    && python3 -m pip install --no-cache-dir --break-system-packages setuptools wheel \
-    && ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
+# Setup the CLI tool (all dependencies and standard libraries are perfectly integrated now)
+RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
     && marzban-cli completion install --shell bash
 
