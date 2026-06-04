@@ -54,9 +54,8 @@ jobs:
         id: get_ip
         run: |
           cd terraform-ec2/
-          # Tailored to look for your exact root output named "public_ip"
-          echo "vps_ip=$(terraform-output -raw public_ip)" >> $GITHUB_OUTPUT
-
+          # NATIVE FIX: Run standard terraform output directly to bypass wrapper limitations
+          echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
   # STEP 3: Automated Docker Build
   build-image:
     needs: test-and-lint
