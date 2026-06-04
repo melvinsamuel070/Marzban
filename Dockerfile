@@ -12,21 +12,23 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ./requirements.txt /code/
-RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir --upgrade -r /code/requirements.txt
+RUN python3 -m pip install --upgrade pip \
+    && pip install --no-cache-dir --user -r /code/requirements.txt
 
 FROM python:$PYTHON_VERSION-slim
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /code
 
-# Copy the completely compiled python environment directly over the runtime system files
-COPY --from=build /usr/local /usr/local
+# Copy the user installation directory directly to match global paths safely
+COPY --from=build /root/.local /root/.local
 COPY --from=build /usr/local/share/xray /usr/local/share/xray
+
+# Bind the user binary paths to the runtime path environment
+ENV PATH=/root/.local/bin:$PATH
 
 COPY . /code
 
-# Setup the CLI tool (all dependencies and standard libraries are perfectly integrated now)
 RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
     && marzban-cli completion install --shell bash
