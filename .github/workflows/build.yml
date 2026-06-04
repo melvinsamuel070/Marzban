@@ -148,7 +148,8 @@ jobs:
         id: get_ip
         run: |
           cd terraform-ec2/
-          echo "vps_ip=$(terraform-output -raw vps_public_ip)" >> $GITHUB_OUTPUT
+          # CHANGED: Now looks for your exact root output named "public_ip"
+          echo "vps_ip=$(terraform-output -raw public_ip)" >> $GITHUB_OUTPUT
   # STEP 3: Automated Docker Build
   build-image:
     needs: test-and-lint
