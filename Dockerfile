@@ -33,7 +33,7 @@ COPY . /code
 
 # We force pip to install setuptools globally for all users, or fallback safely
 RUN python3 -m pip install --upgrade pip \
-    && python3 -m pip install --no-cache-dir --break-system-packages setuptools \
+    && python3 -m pip install --no-cache-dir --break-system-packages setuptools wheel \
     && ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
     && marzban-cli completion install --shell bash
