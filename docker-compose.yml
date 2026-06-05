@@ -10,7 +10,6 @@
 
 
 
-
 services:
   marzban:
     image: ${DOCKER_USER}/marzban:latest
@@ -20,8 +19,8 @@ services:
     networks:
       - marzban-net
     environment:
-      UVICORN_HOST: "0.0.0.0"
-      UVICORN_PORT: 8000
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8000
 
   nginx:
     image: nginx:alpine
