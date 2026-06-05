@@ -106,7 +106,7 @@ jobs:
           VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
         with:
           host: ${{ needs.infrastructure.outputs.vps_ip }}
-          username: root # Change to ubuntu if your AWS AMI uses the ubuntu user
+          username: ubuntu # Updated to ubuntu for AWS AMI compatibility
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
           script: |
