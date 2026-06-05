@@ -696,7 +696,7 @@ jobs:
             sudo docker compose pull
             sudo docker compose up -d --remove-orphans --force-recreate marzban nginx
             sleep 5
-
+            
             # 9. Dispatch Certbot to issue real certificates
             echo " Requesting real Let's Encrypt validation keys..."
             sudo docker run --rm \
@@ -721,6 +721,7 @@ jobs:
             echo " Swapping mock elements for live authenticated lines..."
             sudo docker compose exec -T nginx nginx -s reload
 
-            # 11. Final run sync status
-            sudo docker compose up -d --remove-orphans --force-recreate
+            # 11. Final run sync status (Targeting ONLY the active operational containers)
+            echo " Synchronizing final active services..."
+            sudo docker compose up -d --remove-orphans marzban nginx
             echo "====== Pipeline Processing Cycle Completed Successfully ======"
