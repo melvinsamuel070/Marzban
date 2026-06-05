@@ -39,8 +39,10 @@ jobs:
 
       - name: Terraform Init & Apply
         env:
-          # Satisfies the interactive prompt roadblock
+          # Satisfies the interactive prompt roadblocks
           TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }} 
+          TF_VAR_instance_name: "marzban-production-server" # Injects the missing instance name parameter automatically
+          
           # PROVIDES SECURITY ACCESS KEYS TO AWS NATIVELY
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
