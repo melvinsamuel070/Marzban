@@ -699,6 +699,12 @@ jobs:
               --non-interactive \
               --keep-until-expiring
 
+            # 9b. Dynamically fix Certbot -0001 folder naming collisions
+            if [ -d "/etc/letsencrypt/live/$APP_DOMAIN-0001" ]; then
+                echo "🔄 Adjusting Nginx path references to point to the newly generated -0001 directory structure..."
+                sed -i "s|live/$APP_DOMAIN|live/$APP_DOMAIN-0001|g" nginx/conf.d/marzban.conf
+            fi
+
             # 10. Seamlessly hot-reload Nginx configuration
             echo " Swapping mock elements for live authenticated lines..."
             sudo docker compose exec -T nginx nginx -s reload
