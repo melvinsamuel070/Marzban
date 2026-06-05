@@ -592,6 +592,17 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Pre-configure target directory permissions via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ needs.infrastructure.outputs.vps_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            sudo mkdir -p /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /opt/marzban-production
+
       - name: Copy Stack Configurations to Target Host (Compose & Nginx)
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -600,6 +611,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "docker-compose.yml,nginx/conf.d/marzban.conf"
           target: "/opt/marzban-production/"
+          overwrite: true
 
       - name: Automated Bootstrapping via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -679,10 +691,10 @@ jobs:
                 ln -sf "$FALLBACK_DIR/privkey.pem" "$CERT_DIR/privkey.pem"
             fi
 
-            # 8. Spin up core architecture cleanly with the placeholder files
+            # 8. Pull updated registry images and deploy runtime services cleanly
             echo " Launching core container ecosystem..."
             sudo docker compose pull
-            sudo docker compose up -d marzban nginx --remove-orphans
+            sudo docker compose up -d --remove-orphans --force-recreate marzban nginx
             sleep 5
 
             # 9. Dispatch Certbot to issue real certificates
@@ -710,5 +722,5 @@ jobs:
             sudo docker compose exec -T nginx nginx -s reload
 
             # 11. Final run sync status
-            sudo docker compose up -d --remove-orphans
+            sudo docker compose up -d --remove-orphans --force-recreate
             echo "====== Pipeline Processing Cycle Completed Successfully ======"
