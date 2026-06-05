@@ -1,8 +1,50 @@
+# services:
+#   marzban:
+#     image: gozargah/marzban:latest
+#     restart: always
+#     env_file: .env
+#     network_mode: host
+#     volumes:
+#       - /var/lib/marzban:/var/lib/marzban
+
+
+
+
+
 services:
   marzban:
-    image: gozargah/marzban:latest
+    image: ${DOCKER_USER}/marzban:latest
     restart: always
-    env_file: .env
-    network_mode: host
+    expose:
+      - "8000"
+    networks:
+      - marzban-net
+    environment:
+      UVICORN_HOST: "0.0.0.0"
+      UVICORN_PORT: 8000
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
     volumes:
-      - /var/lib/marzban:/var/lib/marzban
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - /etc/letsencrypt:/etc/letsencrypt
+      - /var/www/certbot:/var/www/certbot
+    networks:
+      - marzban-net
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+      - /var/www/certbot:/var/www/certbot
+    networks:
+      - marzban-net
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+networks:
+  marzban-net:
+    driver: bridge
