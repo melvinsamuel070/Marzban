@@ -123,7 +123,7 @@ jobs:
             echo "Updating DuckDNS record for $SUBDOMAIN to point to $VPS_IP..."
             curl -s "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
             
-            # UPDATED: Extended delay to 45 seconds for global DNS propagation stability
+            # Extended delay to 45 seconds for global DNS propagation stability
             echo "Sleeping for 45 seconds to let public DNS networks sync paths..."
             sleep 45
 
@@ -161,9 +161,8 @@ jobs:
             }
             EOF
 
-            # 5. Write out a dynamic docker-compose execution stack
+            # 5. Write out a dynamic docker-compose execution stack (Removed obsolete version tag)
             cat << EOF > docker-compose.yml
-            version: '3.8'
             services:
               marzban:
                 image: $DOCKER_USER/marzban:latest
@@ -194,7 +193,8 @@ jobs:
 
             # 6. Spin up HTTP Nginx validation instance using sudo privilege
             sudo docker compose up -d nginx
-            sleep 5
+            echo "Waiting 10 seconds for Nginx listener bindings to stabilize..."
+            sleep 10
 
             # 7. Automate Certificate Request Injection with Let's Encrypt
             sudo docker run --rm \
