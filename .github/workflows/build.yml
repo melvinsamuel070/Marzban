@@ -351,7 +351,6 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
           script: |
-
             set -e
 
             # 1. Update DuckDNS
@@ -360,9 +359,8 @@ jobs:
             echo "Updating DuckDNS..."
             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
 
-            # 2. WAIT FOR REAL DNS PROPAGATION (CRITICAL FIX)
+            # 2. WAIT FOR REAL DNS PROPAGATION
             echo "Waiting for DNS propagation..."
-
             for i in {1..30}; do
               CURRENT_IP=$(nslookup $APP_DOMAIN | awk '/Address: / {print $2}' | tail -n1)
               echo "DNS resolved to: $CURRENT_IP"
@@ -371,14 +369,13 @@ jobs:
                 echo "DNS is correct ✔"
                 break
               fi
-
               sleep 10
             done
 
             # 3. Install Docker if missing
             if ! command -v docker &> /dev/null; then
               sudo apt-get update -y
-              sudo apt-get install -y ca-certificates curl gnupg
+              sudo apt-get install -y ca-certificates curl gnupg dnsutils
               sudo install -m 0755 -d /etc/apt/keyrings
 
               curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -391,81 +388,50 @@ jobs:
               sudo usermod -aG docker ubuntu
             fi
 
-            # 4. Setup directories
+            # 4. Setup production workspace paths safely
             sudo mkdir -p /opt/marzban-production/nginx/conf.d
+            sudo mkdir -p /etc/letsencrypt/live/$APP_DOMAIN
+            sudo mkdir -p /etc/letsencrypt/archive/$APP_DOMAIN
+            sudo mkdir -p /var/www/certbot
+            
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /etc/letsencrypt
+            sudo chown -R ubuntu:ubuntu /var/www/certbot
             cd /opt/marzban-production
 
-            # 5. Nginx HTTP bootstrap (required for certbot)
+            # 5. Check and seed temporary certificates to safeguard Nginx parsed runs
+            CERT_DIR="/etc/letsencrypt/live/$APP_DOMAIN"
+            ARCHIVE_DIR="/etc/letsencrypt/archive/$APP_DOMAIN"
+
+            if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
+                echo "⚠️ Real SSL certificates not found. Creating temporary mock certificates..."
+                openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
+                    -keyout "$ARCHIVE_DIR/privkey.pem" \
+                    -out "$ARCHIVE_DIR/fullchain.pem" \
+                    -subj "/CN=localhost"
+                    
+                ln -sf "$ARCHIVE_DIR/fullchain.pem" "$CERT_DIR/fullchain.pem"
+                ln -sf "$ARCHIVE_DIR/privkey.pem" "$CERT_DIR/privkey.pem"
+            fi
+
+            # 6. Build production-grade configuration definitions (HTTPS-ready from step one)
             cat << EOF > nginx/conf.d/marzban.conf
             server {
                 listen 80;
                 server_name $APP_DOMAIN;
-
+                
                 location /.well-known/acme-challenge/ {
                     root /var/www/certbot;
                 }
 
                 location / {
-                    return 200 "OK";
+                    return 301 https://\$host\$request_uri;
                 }
             }
-            EOF
-
-            # 6. Docker Compose
-            cat << EOF > docker-compose.yml
-            services:
-              marzban:
-                image: $DOCKER_USER/marzban:latest
-                restart: always
-                ports:
-                  - "8000:8000"
-
-              nginx:
-                image: nginx:alpine
-                restart: always
-                ports:
-                  - "80:80"
-                  - "443:443"
-                volumes:
-                  - ./nginx/conf.d:/etc/nginx/conf.d
-                  - /etc/letsencrypt:/etc/letsencrypt
-                  - /var/www/certbot:/var/www/certbot
-
-              certbot:
-                image: certbot/certbot
-                volumes:
-                  - /etc/letsencrypt:/etc/letsencrypt
-                  - /var/www/certbot:/var/www/certbot
-                entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait \$\${!}; done;'"
-            EOF
-
-            # 7. Start nginx (HTTP only)
-            sudo docker compose up -d nginx
-            sleep 10
-
-            # 8. SSL certificate request
-            sudo docker run --rm \
-              -v /etc/letsencrypt:/etc/letsencrypt \
-              -v /var/www/certbot:/var/www/certbot \
-              certbot/certbot certonly --webroot \
-              --webroot-path=/var/www/certbot \
-              -d $APP_DOMAIN \
-              --email $APP_EMAIL \
-              --agree-tos \
-              --no-eff-email \
-              --non-interactive
-
-            # 9. HTTPS nginx config
-            cat << EOF > nginx/conf.d/marzban.conf
-            server {
-                listen 80;
-                server_name $APP_DOMAIN;
-                return 301 https://\$host\$request_uri;
-            }
 
             server {
-                listen 443 ssl http2;
+                listen 443 ssl;
+                http2 on;
                 server_name $APP_DOMAIN;
 
                 ssl_certificate /etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem;
@@ -480,7 +446,70 @@ jobs:
             }
             EOF
 
-            # 10. Deploy final stack
+            # 7. Write production-hardened isolated network compose stack
+            cat << EOF > docker-compose.yml
+            services:
+              marzban:
+                image: $DOCKER_USER/marzban:latest
+                restart: always
+                expose:
+                  - "8000"
+                networks:
+                  - marzban-net
+                environment:
+                  UVICORN_HOST: "0.0.0.0"
+                  UVICORN_PORT: 8000
+
+              nginx:
+                image: nginx:alpine
+                restart: always
+                ports:
+                  - "80:80"
+                  - "443:443"
+                volumes:
+                  - ./nginx/conf.d:/etc/nginx/conf.d
+                  - /etc/letsencrypt:/etc/letsencrypt
+                  - /var/www/certbot:/var/www/certbot
+                networks:
+                  - marzban-net
+
+              certbot:
+                image: certbot/certbot
+                volumes:
+                  - /etc/letsencrypt:/etc/letsencrypt
+                  - /var/www/certbot:/var/www/certbot
+                networks:
+                  - marzban-net
+                entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait \$\${!}; done;'"
+
+            networks:
+              marzban-net:
+                driver: bridge
+            EOF
+
+            # 8. Spin up core architecture cleanly with the placeholder files
+            echo "🚀 Launching core container ecosystem..."
             sudo docker compose pull
+            sudo docker compose up -d marzban nginx --remove-orphans
+            sleep 5
+
+            # 9. Dispatch Certbot to issue real certificates via active port 80 proxy routes
+            echo "🔒 Requesting real Let's Encrypt validation keys..."
+            sudo docker run --rm \
+              -v /etc/letsencrypt:/etc/letsencrypt \
+              -v /var/www/certbot:/var/www/certbot \
+              certbot/certbot certonly --webroot \
+              --webroot-path=/var/www/certbot \
+              -d $APP_DOMAIN \
+              --email $APP_EMAIL \
+              --agree-tos \
+              --no-eff-email \
+              --non-interactive
+
+            # 10. Seamlessly hot-reload Nginx configuration with valid signatures
+            echo "🔄 Swapping mock elements for live authenticated lines..."
+            sudo docker compose exec -T nginx nginx -s reload
+
+            # 11. Run background tasks setup complete synchronization
             sudo docker compose up -d --remove-orphans
-            sudo docker compose restart nginx
+            echo "====== Pipeline Processing Cycle Completed Successfully ======"
