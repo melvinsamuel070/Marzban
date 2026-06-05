@@ -1,9 +1,18 @@
 variable "aws_region" {
+  type    = string
   default = "us-east-1"
 }
 
 variable "instance_name" {
-  default = "dev-server"
+  type = string
+}
+
+variable "instance_type" {
+  type = string
+}
+
+variable "key_name" {
+  type = string
 }
 
 variable "instance_count" {
@@ -11,17 +20,7 @@ variable "instance_count" {
   default = 1
 }
 
-variable "key_name" {
-  description = "Existing AWS Key Pair"
-}
-
-variable "instance_type" {
-  default = "t3.micro"
-}
-
 variable "architecture" {
-  description = "CPU architecture: x86 or arm"
-  type        = string
-  default     = "x86"
+  type    = string
+  default = "x86"
 }
-
