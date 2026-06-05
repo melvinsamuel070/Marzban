@@ -123,8 +123,9 @@ jobs:
             echo "Updating DuckDNS record for $SUBDOMAIN to point to $VPS_IP..."
             curl -s "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
             
-            # Give global DNS routers 15 seconds to sync paths
-            sleep 15
+            # UPDATED: Extended delay to 45 seconds for global DNS propagation stability
+            echo "Sleeping for 45 seconds to let public DNS networks sync paths..."
+            sleep 45
 
             # 2. AUTOMATED SYSTEM DEPENDENCY INJECTION
             # Installs Docker and the Docker Compose plugin seamlessly if missing from the bare AWS AMI
@@ -229,9 +230,6 @@ jobs:
             sudo docker compose pull
             sudo docker compose up -d --remove-orphans
             sudo docker compose restart nginx
-
-
-
 
 
 
