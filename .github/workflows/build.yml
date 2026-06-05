@@ -55,6 +55,11 @@ jobs:
           
       - name: Extract VPS Public IP
         id: get_ip
+        env:
+          # PROVIDES SECURITY ACCESS TO THE S3 BACKEND STATE FILE
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
         run: |
           cd terraform-ec2/
           # NATIVE FIX: Run standard terraform output directly to bypass wrapper limitations
