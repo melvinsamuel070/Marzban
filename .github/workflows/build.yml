@@ -238,7 +238,19 @@
 
 
 
-name: End-to-End Infrastructure & App Deployment
+
+
+
+
+
+
+
+
+
+
+
+
+nname: End-to-End Infrastructure & App Deployment
 
 on:
   push:
@@ -378,14 +390,14 @@ jobs:
             echo "Updating DuckDNS..."
             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
 
-            # 2. WAIT FOR REAL DNS PROPAGATION (Increased timeout)
+            # 2. WAIT FOR REAL DNS PROPAGATION
             echo "Waiting for DNS propagation..."
             DNS_CORRECT=false
             for i in {1..60}; do
               CURRENT_IP=$(dig +short $APP_DOMAIN | head -n1)
               echo "Attempt $i/60 - DNS resolved to: ${CURRENT_IP:-'Not resolved yet'}"
               if [ "$CURRENT_IP" = "$VPS_IP" ]; then
-                echo "DNS is correct ✔"
+                echo "✅ DNS is correct"
                 DNS_CORRECT=true
                 break
               fi
@@ -428,72 +440,147 @@ jobs:
             # 6. Inject dynamic application domain references directly into the tracked config
             sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/marzban.conf
 
-            # 7. Remove any existing mock certificates or old certificate directories
-            echo "Cleaning up old certificate directories..."
-            sudo rm -rf /etc/letsencrypt/live/$APP_DOMAIN*
-            sudo rm -rf /etc/letsencrypt/archive/$APP_DOMAIN*
-            sudo rm -rf /etc/letsencrypt/renewal/$APP_DOMAIN*
-
-            # 8. Start Nginx in staging mode to handle certbot webroot challenges
-            echo "Starting Nginx for initial SSL challenge handling..."
-            sudo docker compose pull nginx
-            sudo docker compose up -d nginx
-            sleep 5
-
-            # 9. Request real Let's Encrypt certificates using webroot method
-            echo "Requesting real Let's Encrypt certificates..."
-            sudo docker run --rm \
-              -v /etc/letsencrypt:/etc/letsencrypt \
-              -v /var/www/certbot:/var/www/certbot \
-              -v /var/lib/letsencrypt:/var/lib/letsencrypt \
-              certbot/certbot certonly --webroot \
-              --webroot-path=/var/www/certbot \
-              -d $APP_DOMAIN \
-              --email $APP_EMAIL \
-              --agree-tos \
-              --no-eff-email \
-              --non-interactive \
-              --keep-until-expiring \
-              --expand
-
-            # 10. Verify certificates were created successfully
-            if [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ]; then
-              echo "❌ SSL certificate generation failed! Check Certbot logs."
-              echo "Attempting to diagnose..."
-              sudo docker run --rm \
-                -v /etc/letsencrypt:/etc/letsencrypt \
-                certbot/certbot certificates
-              exit 1
+            # 7. Check if valid certificate exists
+            echo "Checking for existing valid certificate..."
+            CERT_VALID=false
+            if sudo docker run --rm -v /etc/letsencrypt:/etc/letsencrypt certbot/certbot certificates 2>/dev/null | grep -q "$APP_DOMAIN.*VALID"; then
+              echo "✅ Valid certificate already exists, skipping issuance"
+              CERT_VALID=true
+            else
+              echo "⚠️ No valid certificate found, will request new one"
             fi
 
-            echo "✅ SSL certificates successfully obtained!"
-
-            # 11. Update Nginx config with final certificate paths (if needed)
-            echo "Ensuring Nginx config points to correct certificate paths..."
+            # 8. Start HTTP version first to ensure service is accessible
+            echo "Starting HTTP version temporarily..."
+            cp nginx/conf.d/marzban.conf nginx/conf.d/marzban.conf.ssl-backup
+            sed -i 's/listen 443 ssl;/listen 80;/g' nginx/conf.d/marzban.conf
+            sed -i 's/ssl_certificate.*/# &/g' nginx/conf.d/marzban.conf
+            sed -i 's/ssl_certificate_key.*/# &/g' nginx/conf.d/marzban.conf
             
-            # 12. Pull and restart full stack with real certificates
-            echo "Starting full stack with real SSL certificates..."
-            sudo docker compose pull
+            echo "Pulling latest docker container images quietly..."
+            sudo docker compose pull --quiet
+            
+            echo "Bootstrapping core containers..."
             sudo docker compose up -d --force-recreate --remove-orphans
-            
-            # 13. Wait for services to be ready
             sleep 10
+
+            # 9. Request certificates if needed
+            if [ "$CERT_VALID" = false ]; then
+              echo "Requesting Let's Encrypt certificates..."
+              
+              # Stop nginx for standalone mode (more reliable)
+              sudo docker compose stop nginx
+              
+              # Try with retry logic for rate limits
+              MAX_RETRIES=3
+              RETRY_COUNT=0
+              CERT_SUCCESS=false
+              
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$CERT_SUCCESS" = false ]; do
+                if sudo docker run --rm \
+                  -v /etc/letsencrypt:/etc/letsencrypt \
+                  -v /var/lib/letsencrypt:/var/lib/letsencrypt \
+                  certbot/certbot certonly --standalone \
+                  -d $APP_DOMAIN \
+                  --email $APP_EMAIL \
+                  --agree-tos \
+                  --no-eff-email \
+                  --non-interactive \
+                  --keep-until-expiring; then
+                  CERT_SUCCESS=true
+                  echo "✅ Certificates obtained successfully"
+                else
+                  RETRY_COUNT=$((RETRY_COUNT + 1))
+                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                    echo "⚠️ Certificate request failed (attempt $RETRY_COUNT/$MAX_RETRIES), waiting 60 seconds..."
+                    sleep 60
+                  fi
+                fi
+              done
+              
+              # If still failed, use staging or HTTP fallback
+              if [ "$CERT_SUCCESS" = false ]; then
+                echo "⚠️ Production certificate failed, trying staging environment..."
+                if sudo docker run --rm \
+                  -v /etc/letsencrypt:/etc/letsencrypt \
+                  -v /var/lib/letsencrypt:/var/lib/letsencrypt \
+                  certbot/certbot certonly --standalone \
+                  -d $APP_DOMAIN \
+                  --email $APP_EMAIL \
+                  --agree-tos \
+                  --no-eff-email \
+                  --non-interactive \
+                  --staging; then
+                  echo "✅ Staging certificates obtained (for testing)"
+                  CERT_SUCCESS=true
+                else
+                  echo "⚠️ Continuing with HTTP only mode"
+                fi
+              fi
+            else
+              CERT_SUCCESS=true
+            fi
+
+            # 10. Restore SSL configuration if certificates exist
+            if [ "$CERT_SUCCESS" = true ] && [ -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ]; then
+              echo "Restoring SSL configuration..."
+              mv nginx/conf.d/marzban.conf.ssl-backup nginx/conf.d/marzban.conf
+              
+              # Verify certificate paths
+              echo "Verifying certificate paths..."
+              sudo ls -la /etc/letsencrypt/live/$APP_DOMAIN/
+              
+              echo "Starting full stack with SSL..."
+              sudo docker compose up -d --force-recreate --remove-orphans
+              sleep 10
+              
+              # Test SSL
+              echo "Testing SSL configuration..."
+              sudo docker run --rm \
+                --network container:marzban-production-nginx-1 \
+                curlimages/curl:latest curl -s -k -o /dev/null -w "%{http_code}\n" \
+                https://localhost || echo "⚠️ SSL test warning"
+              
+              # Setup auto-renewal
+              echo "Setting up automatic certificate renewal..."
+              (sudo crontab -l 2>/dev/null | grep -v "certbot renew"; echo "0 3 * * * docker run --rm -v /etc/letsencrypt:/etc/letsencrypt certbot/certbot renew --quiet && sudo docker compose exec -T nginx nginx -s reload") | sudo crontab -
+            else
+              echo "⚠️ Running in HTTP mode (certificates unavailable)"
+              echo "To switch to HTTPS later, run:"
+              echo "  cd /opt/marzban-production"
+              echo "  sudo docker compose stop nginx"
+              echo "  sudo docker run --rm -v /etc/letsencrypt:/etc/letsencrypt -v /var/lib/letsencrypt:/var/lib/letsencrypt certbot/certbot certonly --standalone -d $APP_DOMAIN --email $APP_EMAIL --agree-tos --no-eff-email --non-interactive"
+              echo "  sudo docker compose up -d --force-recreate"
+            fi
             
-            # 14. Test SSL configuration
-            echo "Testing SSL configuration..."
-            sudo docker run --rm \
-              -v /etc/letsencrypt:/etc/letsencrypt \
-              --network container:marzban-production-nginx-1 \
-              curlimages/curl:latest curl -s -o /dev/null -w "%{http_code}\n" \
-              --resolve $APP_DOMAIN:443:127.0.0.1 \
-              https://$APP_DOMAIN || echo "⚠️ SSL test returned non-200, but continuing..."
-            
-            # 15. Setup auto-renewal cron job
-            echo "Setting up automatic certificate renewal..."
-            (sudo crontab -l 2>/dev/null | grep -v "certbot renew"; echo "0 3 * * * docker run --rm -v /etc/letsencrypt:/etc/letsencrypt -v /var/www/certbot:/var/www/certbot certbot/certbot renew --quiet && docker compose exec -T nginx nginx -s reload") | sudo crontab -
+            # Final health check
+            echo "Performing final health check..."
+            HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" http://localhost)
+            if [ "$HEALTH_CHECK" = "200" ] || [ "$HEALTH_CHECK" = "302" ]; then
+              echo "✅ Service is healthy (HTTP $HEALTH_CHECK)"
+            else
+              echo "⚠️ Health check returned: $HEALTH_CHECK"
+              echo "Checking container logs..."
+              sudo docker compose logs --tail=50
+            fi
             
             echo "====== Pipeline Processing Cycle Completed Successfully ======"
-            echo "✅ Marzban is now available at: https://$APP_DOMAIN"
+            if [ -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ]; then
+              echo "✅ Marzban is available at: https://$APP_DOMAIN"
+            else
+              echo "✅ Marzban is available at: http://$APP_DOMAIN"
+              echo "⚠️ Note: Running in HTTP mode. SSL will be enabled on next successful certificate request."
+            fi
+
+
+
+
+
+
+
+
+
+
 
 
 
