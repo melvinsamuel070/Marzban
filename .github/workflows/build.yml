@@ -427,9 +427,9 @@ jobs:
             # 4. Setup production workspace paths
             sudo mkdir -p /opt/marzban-production/nginx/conf.d
             sudo mkdir -p /etc/letsencrypt
-            sudo mkdir -p /var/www/certbot
+            sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
             sudo mkdir -p /var/lib/letsencrypt
-            
+
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
             sudo chown -R ubuntu:ubuntu /etc/letsencrypt
             sudo chown -R ubuntu:ubuntu /var/www/certbot
@@ -452,7 +452,7 @@ jobs:
             echo "Starting Nginx for initial SSL challenge handling..."
             sudo docker compose pull nginx
             sudo docker compose up -d nginx
-            sleep 5
+            sleep 8
 
             # 9. Request real Let's Encrypt certificates using webroot method
             echo "Requesting real Let's Encrypt certificates..."
@@ -470,10 +470,13 @@ jobs:
               --keep-until-expiring \
               --expand
 
-            # 10. Verify certificates were created successfully
-            if [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ]; then
-              echo "❌ SSL certificate generation failed! Check Certbot logs."
-              echo "Attempting to diagnose..."
+            # 10. Verify certificates were created successfully (FIXED LOGIC)
+            echo "Verifying certificate..."
+            CERT_PATH="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
+
+            if [ ! -f "$CERT_PATH" ]; then
+              echo "❌ SSL certificate generation failed! Debug output:"
+              sudo ls -la /etc/letsencrypt/live/ || true
               sudo docker run --rm \
                 -v /etc/letsencrypt:/etc/letsencrypt \
                 certbot/certbot certificates
@@ -482,51 +485,38 @@ jobs:
 
             echo "✅ SSL certificates successfully obtained!"
 
-            # 11. Update Nginx config with final certificate paths (if needed)
-            echo "Ensuring Nginx config points to correct certificate paths..."
-            
-            # 12. Pull and restart full stack with real certificates
+            # 11. Restart full stack safely
             echo "Starting full stack with real SSL certificates..."
-            sudo docker compose pull
             sudo docker compose up -d --force-recreate --remove-orphans
-            
-            # 13. Wait for services to be ready
-            sleep 15
-            
-            # 14. Test SSL configuration
-            echo "Testing SSL configuration..."
-            sudo docker run --rm \
-              -v /etc/letsencrypt:/etc/letsencrypt \
-              --network container:marzban-production-nginx-1 \
-              curlimages/curl:latest curl -s -o /dev/null -w "%{http_code}\n" \
-              --resolve $APP_DOMAIN:443:127.0.0.1 \
-              https://$APP_DOMAIN || echo "⚠️ SSL test returned non-200, but continuing..."
-            
-            # 15. Setup auto-renewal cron job
+
+            # 12. Wait for services
+            sleep 10
+
+            # 13. Test HTTP (SAFE, NO DOCKER NETWORK DEPENDENCY)
+            echo "Testing application endpoint..."
+            HTTP_CHECK=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1 || true)
+            echo "HTTP status: $HTTP_CHECK"
+
+            # 14. Setup auto-renewal cron job
             echo "Setting up automatic certificate renewal..."
             (sudo crontab -l 2>/dev/null | grep -v "certbot renew"; echo "0 3 * * * docker run --rm -v /etc/letsencrypt:/etc/letsencrypt -v /var/www/certbot:/var/www/certbot certbot/certbot renew --quiet && docker compose exec -T nginx nginx -s reload") | sudo crontab -
-            
-            # 16. Final health check
+
+            # 15. Final health check
             echo "Performing final health check..."
             set +e
             HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1)
             set -e
-            
+
             if [ "$HEALTH_CHECK" = "200" ] || [ "$HEALTH_CHECK" = "302" ] || [ "$HEALTH_CHECK" = "401" ]; then
               echo "✅ Service is running cleanly (HTTP Status: $HEALTH_CHECK)"
             else
-              echo "⚠️ Health check returned status: ${HEALTH_CHECK:-Failed to connect}"
-              echo "Printing system diagnostics..."
+              echo "⚠️ Health check returned status: ${HEALTH_CHECK:-Failed}"
               sudo docker compose ps
               sudo docker compose logs --tail=50 nginx
             fi
 
             echo "====== Pipeline Processing Cycle Completed Successfully ======"
             echo "🚀 Marzban is now available at: https://$APP_DOMAIN"
-
-
-
-
 
 
 
