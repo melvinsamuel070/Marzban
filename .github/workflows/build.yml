@@ -818,6 +818,7 @@ jobs:
           pip install flake8
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
+
   # STEP 2: Infrastructure Provisioning (Terraform)
   infrastructure:
     needs: test-and-lint
@@ -851,7 +852,17 @@ jobs:
         id: get_ip
         run: |
           cd terraform-ec2/
-          echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+          VPS_IP=$(terraform output -raw public_ip)
+          echo "vps_ip=$VPS_IP" >> $GITHUB_OUTPUT
+
+          # 🔥 HARD FAIL IF EMPTY (fixes dial tcp :0)
+          if [ -z "$VPS_IP" ]; then
+            echo "ERROR: Terraform did not return VPS IP"
+            exit 1
+          fi
+
+          echo "VPS IP = $VPS_IP"
+
 
   # STEP 3: Docker Image Build
   build-image:
@@ -882,6 +893,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
 
+
   # STEP 4: Deployment + SSL + App Bootstrapping
   deploy-and-secure:
     needs: [infrastructure, build-image]
@@ -902,6 +914,7 @@ jobs:
             sudo mkdir -p /opt/marzban-production
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
 
+
       # Copy configs
       - name: Copy Docker + Nginx config
         uses: appleboy/scp-action@v0.1.7
@@ -911,6 +924,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "docker-compose.yml,nginx/conf.d/marzban.conf"
           target: "/opt/marzban-production/"
+
 
       # Deploy
       - name: Deploy Application + SSL
@@ -928,6 +942,8 @@ jobs:
           envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
           script: |
             set -e
+
+            echo "VPS IP: $VPS_IP"
 
             # 1. Update DuckDNS
             SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
@@ -956,10 +972,10 @@ jobs:
 
             # 5. Inject domain into HTTP bootstrap config
             sed "s|placeholder|$APP_DOMAIN|g" \
-              nginx/conf.d/marzban-http.conf \
+              nginx/conf.d/marzban.conf \
               > nginx/conf.d/default.conf
 
-            # 6. Start nginx in HTTP-only mode
+            # 6. Start nginx
             sudo docker compose up -d nginx
 
             echo "Waiting for nginx..."
@@ -979,14 +995,13 @@ jobs:
               --non-interactive \
               --keep-until-expiring
 
-            # 8. Switch nginx to HTTPS configuration
+            # 8. Switch to HTTPS config
             sed "s|placeholder|$APP_DOMAIN|g" \
               nginx/conf.d/marzban.conf \
               > nginx/conf.d/default.conf
 
             # 9. Start full stack
             sudo docker compose up -d --force-recreate marzban nginx
-
             sudo docker compose exec -T nginx nginx -s reload
 
             echo "====== DEPLOYMENT COMPLETE ======"
