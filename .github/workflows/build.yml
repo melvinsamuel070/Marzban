@@ -249,266 +249,280 @@
 
 
 
+name: End-to-End Infrastructure & App Deployment
 
-# name: End-to-End Infrastructure & App Deployment
+on:
+  push:
+    branches: [ master ]
 
-# on:
-#   push:
-#     branches: [ master ]
+jobs:
+  # STEP 1: Code Linting and Safety Verification
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-# jobs:
-#   # STEP 1: Code Linting and Safety Verification
-#   test-and-lint:
-#     runs-on: ubuntu-latest
-#     steps:
-#       - name: Checkout Code
-#         uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-#       - name: Set up Python
-#         uses: actions/setup-python@v5
-#         with:
-#           python-version: '3.10'
+      - name: Run Syntax Checks
+        run: |
+          pip install flake8
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
-#       - name: Run Syntax Checks
-#         run: |
-#           pip install flake8
-#           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+  # STEP 2: Terraform Infrastructure Provisioning
+  infrastructure:
+    needs: test-and-lint
+    runs-on: ubuntu-latest
+    outputs:
+      vps_ip: ${{ steps.get_ip.outputs.vps_ip }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-#   # STEP 2: Terraform Infrastructure Provisioning
-#   infrastructure:
-#     needs: test-and-lint
-#     runs-on: ubuntu-latest
-#     outputs:
-#       vps_ip: ${{ steps.get_ip.outputs.vps_ip }}
-#     steps:
-#       - name: Checkout Code
-#         uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-#       - name: Setup Terraform
-#         uses: hashicorp/setup-terraform@v3
-#         with:
-#           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+      - name: Terraform Init & Apply
+        env:
+          TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }}
+          TF_VAR_instance_name: "marzban-production-server"
+          TF_VAR_instance_type: "t3.medium"
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          cd terraform-ec2/
+          terraform init
+          terraform apply -auto-approve
 
-#       - name: Terraform Init & Apply
-#         env:
-#           TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }}
-#           TF_VAR_instance_name: "marzban-production-server"
-#           TF_VAR_instance_type: "t3.medium"
-#           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-#         run: |
-#           cd terraform-ec2/
-#           terraform init
-#           terraform apply -auto-approve
+      - name: Extract VPS Public IP
+        id: get_ip
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          cd terraform-ec2/
+          echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
 
-#       - name: Extract VPS Public IP
-#         id: get_ip
-#         env:
-#           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-#         run: |
-#           cd terraform-ec2/
-#           echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+  # STEP 3: Automated Docker Build
+  build-image:
+    needs: test-and-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-#   # STEP 3: Automated Docker Build
-#   build-image:
-#     needs: test-and-lint
-#     runs-on: ubuntu-latest
-#     steps:
-#       - name: Checkout Code
-#         uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-#       - name: Set up QEMU
-#         uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-#       - name: Set up Docker Buildx
-#         uses: docker/setup-buildx-action@v3
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-#       - name: Log in to Docker Hub
-#         uses: docker/login-action@v3
-#         with:
-#           username: ${{ secrets.DOCKER_USERNAME }}
-#           password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Build and Push Multi-Arch Container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
 
-#       - name: Build and Push Multi-Arch Container
-#         uses: docker/build-push-action@v5
-#         with:
-#           context: .
-#           push: true
-#           platforms: linux/amd64,linux/arm64
-#           tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
+  # STEP 4: Deployment + DuckDNS + SSL + App Bootstrapping
+  deploy-and-secure:
+    needs: [infrastructure, build-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-#   # STEP 4: Deployment + DuckDNS + SSL + App Bootstrapping
-#   deploy-and-secure:
-#     needs: [infrastructure, build-image]
-#     runs-on: ubuntu-latest
-#     steps:
-#       - name: Checkout Code
-#         uses: actions/checkout@v4
+      - name: Pre-configure target directory permissions via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ needs.infrastructure.outputs.vps_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            sudo mkdir -p /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /opt/marzban-production
 
-#       - name: Pre-configure target directory permissions via SSH
-#         uses: appleboy/ssh-action@v1.0.3
-#         with:
-#           host: ${{ needs.infrastructure.outputs.vps_ip }}
-#           username: ubuntu
-#           key: ${{ secrets.SSH_PRIVATE_KEY }}
-#           port: 22
-#           script: |
-#             sudo mkdir -p /opt/marzban-production
-#             sudo chown -R ubuntu:ubuntu /opt/marzban-production
+      - name: Copy Stack Configurations to Target Host (Compose & Nginx)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ needs.infrastructure.outputs.vps_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml,nginx/conf.d/marzban.conf"
+          target: "/opt/marzban-production/"
+          overwrite: true
 
-#       - name: Copy Stack Configurations to Target Host (Compose & Nginx)
-#         uses: appleboy/scp-action@v0.1.7
-#         with:
-#           host: ${{ needs.infrastructure.outputs.vps_ip }}
-#           username: ubuntu
-#           key: ${{ secrets.SSH_PRIVATE_KEY }}
-#           source: "docker-compose.yml,nginx/conf.d/marzban.conf"
-#           target: "/opt/marzban-production/"
-#           overwrite: true
+      - name: Automated Bootstrapping via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          APP_DOMAIN: ${{ secrets.DOMAIN }}
+          APP_EMAIL: ${{ secrets.EMAIL }}
+          DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
+          DUCK_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
+          VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
+        with:
+          host: ${{ needs.infrastructure.outputs.vps_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
+          script: |
+            set -e
 
-#       - name: Automated Bootstrapping via SSH
-#         uses: appleboy/ssh-action@v1.0.3
-#         env:
-#           APP_DOMAIN: ${{ secrets.DOMAIN }}
-#           APP_EMAIL: ${{ secrets.EMAIL }}
-#           DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
-#           DUCK_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
-#           VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
-#         with:
-#           host: ${{ needs.infrastructure.outputs.vps_ip }}
-#           username: ubuntu
-#           key: ${{ secrets.SSH_PRIVATE_KEY }}
-#           envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
-#           script: |
-#             set -e
+            # 1. Update DuckDNS
+            SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
+            echo "Updating DuckDNS..."
+            curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
 
-#             # 1. Update DuckDNS
-#             SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
-#             echo "Updating DuckDNS..."
-#             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
+            # 2. WAIT FOR REAL DNS PROPAGATION (Bypassing local resolution caching)
+            echo "Waiting for stable authoritative DNS propagation..."
+            DNS_CORRECT=false
+            for i in {1..30}; do
+              CURRENT_IP=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
+              echo "Attempt $i/30 - Public DNS resolved to: ${CURRENT_IP:-'Not resolved yet'}"
+              if [ "$CURRENT_IP" = "$VPS_IP" ]; then
+                if dig @8.8.8.8 $APP_DOMAIN | grep -q "status: NOERROR"; then
+                  echo "✅ DNS is correct and stable across public nameservers."
+                  DNS_CORRECT=true
+                  break
+                fi
+              fi
+              echo "⚠️ DNS unready or unstable. Sleeping 20 seconds..."
+              sleep 20
+            done
 
-#             # 2. WAIT FOR REAL DNS PROPAGATION (Increased timeout)
-#             echo "Waiting for DNS propagation..."
-#             DNS_CORRECT=false
-#             for i in {1..60}; do
-#               CURRENT_IP=$(dig +short $APP_DOMAIN | head -n1)
-#               echo "Attempt $i/60 - DNS resolved to: ${CURRENT_IP:-'Not resolved yet'}"
-#               if [ "$CURRENT_IP" = "$VPS_IP" ]; then
-#                 echo "DNS is correct ✔"
-#                 DNS_CORRECT=true
-#                 break
-#               fi
-#               sleep 10
-#             done
+            if [ "$DNS_CORRECT" = false ]; then
+              echo "❌ DNS propagation failed or nameservers are unstable. Exiting..."
+              exit 1
+            fi
 
-#             if [ "$DNS_CORRECT" = false ]; then
-#               echo "DNS propagation failed after 10 minutes. Exiting..."
-#               exit 1
-#             fi
+            # 3. Install Docker if missing
+            if ! command -v docker &> /dev/null; then
+              sudo apt-get update -y
+              sudo apt-get install -y ca-certificates curl gnupg dnsutils
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              sudo chmod a+r /etc/apt/keyrings/docker.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+              sudo apt-get update -y
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              sudo usermod -aG docker ubuntu
+            fi
 
-#             # 3. Install Docker if missing
-#             if ! command -v docker &> /dev/null; then
-#               sudo apt-get update -y
-#               sudo apt-get install -y ca-certificates curl gnupg dnsutils
-#               sudo install -m 0755 -d /etc/apt/keyrings
-#               curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-#               sudo chmod a+r /etc/apt/keyrings/docker.gpg
-#               echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-#               sudo apt-get update -y
-#               sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-#               sudo usermod -aG docker ubuntu
-#             fi
-
-#             # 4. Setup production workspace paths
-#             sudo mkdir -p /opt/marzban-production/nginx/conf.d
-#             sudo mkdir -p /etc/letsencrypt
-#             sudo mkdir -p /var/www/certbot
-#             sudo mkdir -p /var/lib/letsencrypt
+            # 4. Setup production workspace paths
+            sudo mkdir -p /opt/marzban-production/nginx/conf.d
+            sudo mkdir -p /etc/letsencrypt
+            sudo mkdir -p /var/www/certbot
+            sudo mkdir -p /var/lib/letsencrypt
             
-#             sudo chown -R ubuntu:ubuntu /opt/marzban-production
-#             sudo chown -R ubuntu:ubuntu /etc/letsencrypt
-#             sudo chown -R ubuntu:ubuntu /var/www/certbot
-#             sudo chown -R ubuntu:ubuntu /var/lib/letsencrypt
-#             cd /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /etc/letsencrypt
+            sudo chown -R ubuntu:ubuntu /var/www/certbot
+            sudo chown -R ubuntu:ubuntu /var/lib/letsencrypt
+            cd /opt/marzban-production
 
-#             # 5. Populate remote environment variables configuration file (.env)
-#             echo "DOCKER_USER=${DOCKER_USER}" > .env
+            # 5. Populate remote environment variables configuration file (.env)
+            echo "DOCKER_USER=${DOCKER_USER}" > .env
 
-#             # 6. Inject dynamic application domain references directly into the tracked config
-#             sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/marzban.conf
+            # 6. Inject dynamic application domain references directly into the tracked config
+            sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/marzban.conf
 
-#             # 7. Remove any existing mock certificates or old certificate directories
-#             echo "Cleaning up old certificate directories..."
-#             sudo rm -rf /etc/letsencrypt/live/$APP_DOMAIN*
-#             sudo rm -rf /etc/letsencrypt/archive/$APP_DOMAIN*
-#             sudo rm -rf /etc/letsencrypt/renewal/$APP_DOMAIN*
+            # 7. Remove any existing mock certificates or old certificate directories
+            echo "Cleaning up old certificate directories..."
+            sudo rm -rf /etc/letsencrypt/live/$APP_DOMAIN*
+            sudo rm -rf /etc/letsencrypt/archive/$APP_DOMAIN*
+            sudo rm -rf /etc/letsencrypt/renewal/$APP_DOMAIN*
 
-#             # 8. Start Nginx in staging mode to handle certbot webroot challenges
-#             echo "Starting Nginx for initial SSL challenge handling..."
-#             sudo docker compose pull nginx
-#             sudo docker compose up -d nginx
-#             sleep 5
+            # 8. Start Nginx in staging mode to handle certbot webroot challenges
+            echo "Starting Nginx for initial SSL challenge handling..."
+            sudo docker compose pull nginx
+            sudo docker compose up -d nginx
+            sleep 5
 
-#             # 9. Request real Let's Encrypt certificates using webroot method
-#             echo "Requesting real Let's Encrypt certificates..."
-#             sudo docker run --rm \
-#               -v /etc/letsencrypt:/etc/letsencrypt \
-#               -v /var/www/certbot:/var/www/certbot \
-#               -v /var/lib/letsencrypt:/var/lib/letsencrypt \
-#               certbot/certbot certonly --webroot \
-#               --webroot-path=/var/www/certbot \
-#               -d $APP_DOMAIN \
-#               --email $APP_EMAIL \
-#               --agree-tos \
-#               --no-eff-email \
-#               --non-interactive \
-#               --keep-until-expiring \
-#               --expand
+            # 9. Request real Let's Encrypt certificates using webroot method
+            echo "Requesting real Let's Encrypt certificates..."
+            sudo docker run --rm \
+              -v /etc/letsencrypt:/etc/letsencrypt \
+              -v /var/www/certbot:/var/www/certbot \
+              -v /var/lib/letsencrypt:/var/lib/letsencrypt \
+              certbot/certbot certonly --webroot \
+              --webroot-path=/var/www/certbot \
+              -d $APP_DOMAIN \
+              --email $APP_EMAIL \
+              --agree-tos \
+              --no-eff-email \
+              --non-interactive \
+              --keep-until-expiring \
+              --expand
 
-#             # 10. Verify certificates were created successfully
-#             if [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ]; then
-#               echo " SSL certificate generation failed! Check Certbot logs."
-#               echo "Attempting to diagnose..."
-#               sudo docker run --rm \
-#                 -v /etc/letsencrypt:/etc/letsencrypt \
-#                 certbot/certbot certificates
-#               exit 1
-#             fi
+            # 10. Verify certificates were created successfully
+            if [ ! -f "/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem" ]; then
+              echo "❌ SSL certificate generation failed! Check Certbot logs."
+              echo "Attempting to diagnose..."
+              sudo docker run --rm \
+                -v /etc/letsencrypt:/etc/letsencrypt \
+                certbot/certbot certificates
+              exit 1
+            fi
 
-#             echo " SSL certificates successfully obtained!"
+            echo "✅ SSL certificates successfully obtained!"
 
-#             # 11. Update Nginx config with final certificate paths (if needed)
-#             echo "Ensuring Nginx config points to correct certificate paths..."
+            # 11. Update Nginx config with final certificate paths (if needed)
+            echo "Ensuring Nginx config points to correct certificate paths..."
             
-#             # 12. Pull and restart full stack with real certificates
-#             echo "Starting full stack with real SSL certificates..."
-#             sudo docker compose pull
-#             sudo docker compose up -d --force-recreate --remove-orphans
+            # 12. Pull and restart full stack with real certificates
+            echo "Starting full stack with real SSL certificates..."
+            sudo docker compose pull
+            sudo docker compose up -d --force-recreate --remove-orphans
             
-#             # 13. Wait for services to be ready
-#             sleep 10
+            # 13. Wait for services to be ready
+            sleep 15
             
-#             # 14. Test SSL configuration
-#             echo "Testing SSL configuration..."
-#             sudo docker run --rm \
-#               -v /etc/letsencrypt:/etc/letsencrypt \
-#               --network container:marzban-production-nginx-1 \
-#               curlimages/curl:latest curl -s -o /dev/null -w "%{http_code}\n" \
-#               --resolve $APP_DOMAIN:443:127.0.0.1 \
-#               https://$APP_DOMAIN || echo " SSL test returned non-200, but continuing..."
+            # 14. Test SSL configuration
+            echo "Testing SSL configuration..."
+            sudo docker run --rm \
+              -v /etc/letsencrypt:/etc/letsencrypt \
+              --network container:marzban-production-nginx-1 \
+              curlimages/curl:latest curl -s -o /dev/null -w "%{http_code}\n" \
+              --resolve $APP_DOMAIN:443:127.0.0.1 \
+              https://$APP_DOMAIN || echo "⚠️ SSL test returned non-200, but continuing..."
             
-#             # 15. Setup auto-renewal cron job
-#             echo "Setting up automatic certificate renewal..."
-#             (sudo crontab -l 2>/dev/null | grep -v "certbot renew"; echo "0 3 * * * docker run --rm -v /etc/letsencrypt:/etc/letsencrypt -v /var/www/certbot:/var/www/certbot certbot/certbot renew --quiet && docker compose exec -T nginx nginx -s reload") | sudo crontab -
+            # 15. Setup auto-renewal cron job
+            echo "Setting up automatic certificate renewal..."
+            (sudo crontab -l 2>/dev/null | grep -v "certbot renew"; echo "0 3 * * * docker run --rm -v /etc/letsencrypt:/etc/letsencrypt -v /var/www/certbot:/var/www/certbot certbot/certbot renew --quiet && docker compose exec -T nginx nginx -s reload") | sudo crontab -
             
-#             echo "====== Pipeline Processing Cycle Completed Successfully ======"
-#             echo " Marzban is now available at: https://$APP_DOMAIN"
+            # 16. Final health check
+            echo "Performing final health check..."
+            set +e
+            HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1)
+            set -e
+            
+            if [ "$HEALTH_CHECK" = "200" ] || [ "$HEALTH_CHECK" = "302" ] || [ "$HEALTH_CHECK" = "401" ]; then
+              echo "✅ Service is running cleanly (HTTP Status: $HEALTH_CHECK)"
+            else
+              echo "⚠️ Health check returned status: ${HEALTH_CHECK:-Failed to connect}"
+              echo "Printing system diagnostics..."
+              sudo docker compose ps
+              sudo docker compose logs --tail=50 nginx
+            fi
 
-
-
+            echo "====== Pipeline Processing Cycle Completed Successfully ======"
+            echo "🚀 Marzban is now available at: https://$APP_DOMAIN"
 
 
 
@@ -757,251 +771,3 @@
 #             echo " Synchronizing final active services..."
 #             sudo docker compose up -d --remove-orphans marzban nginx
 #             echo "====== Pipeline Processing Cycle Completed Successfully ======"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-name: End-to-End Infrastructure & App Deployment
-
-on:
-  push:
-    branches: [ master ]
-
-jobs:
-  # STEP 1: Code Linting and Safety Verification
-  test-and-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Run Syntax Checks
-        run: |
-          pip install flake8
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-
-
-  # STEP 2: Infrastructure Provisioning (Terraform)
-  infrastructure:
-    needs: test-and-lint
-    runs-on: ubuntu-latest
-    outputs:
-      vps_ip: ${{ steps.get_ip.outputs.vps_ip }}
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
-
-      - name: Terraform Init & Apply
-        env:
-          TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }}
-          TF_VAR_instance_name: "marzban-production-server"
-          TF_VAR_instance_type: "t3.medium"
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          cd terraform-ec2/
-          terraform init
-          terraform apply -auto-approve
-
-      - name: Extract VPS Public IP
-        id: get_ip
-        run: |
-          cd terraform-ec2/
-          VPS_IP=$(terraform output -raw public_ip)
-          echo "vps_ip=$VPS_IP" >> $GITHUB_OUTPUT
-
-          # 🔥 HARD FAIL IF EMPTY (fixes dial tcp :0)
-          if [ -z "$VPS_IP" ]; then
-            echo "ERROR: Terraform did not return VPS IP"
-            exit 1
-          fi
-
-          echo "VPS IP = $VPS_IP"
-
-
-  # STEP 3: Docker Image Build
-  build-image:
-    needs: test-and-lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and Push Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
-
-
-  # STEP 4: Deployment + SSL + App Bootstrapping
-  deploy-and-secure:
-    needs: [infrastructure, build-image]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      # Prepare directory
-      - name: Prepare remote directory
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ needs.infrastructure.outputs.vps_ip }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            sudo mkdir -p /opt/marzban-production
-            sudo chown -R ubuntu:ubuntu /opt/marzban-production
-
-
-      # Copy configs
-      - name: Copy Docker + Nginx config
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ needs.infrastructure.outputs.vps_ip }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml,nginx/conf.d/marzban.conf"
-          target: "/opt/marzban-production/"
-
-
-      # Deploy
-      - name: Deploy Application + SSL
-        uses: appleboy/ssh-action@v1.0.3
-        env:
-          APP_DOMAIN: ${{ secrets.DOMAIN }}
-          APP_EMAIL: ${{ secrets.EMAIL }}
-          DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
-          DUCK_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
-          VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
-        with:
-          host: ${{ needs.infrastructure.outputs.vps_ip }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
-          script: |
-            set -e
-
-            echo "VPS IP: $VPS_IP"
-
-            # 1. Update DuckDNS
-            SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
-            curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
-
-            # 2. Wait for DNS
-            echo "Waiting for DNS..."
-            sleep 30
-
-            # 3. Install Docker if missing
-            if ! command -v docker &> /dev/null; then
-              sudo apt-get update -y
-              sudo apt-get install -y ca-certificates curl gnupg dnsutils
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-              echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list
-              sudo apt-get update -y
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-            fi
-
-            # 4. Setup directories
-            sudo mkdir -p /var/www/certbot
-            sudo mkdir -p /etc/letsencrypt
-            sudo chown -R ubuntu:ubuntu /opt/marzban-production
-
-            cd /opt/marzban-production
-
-            # 5. Inject domain into HTTP bootstrap config
-            sed "s|placeholder|$APP_DOMAIN|g" \
-              nginx/conf.d/marzban.conf \
-              > nginx/conf.d/default.conf
-
-            # 6. Start nginx
-            sudo docker compose up -d nginx
-
-            echo "Waiting for nginx..."
-            sleep 20
-
-            # 7. Request SSL certificate
-            sudo docker run --rm \
-              -v /etc/letsencrypt:/etc/letsencrypt \
-              -v /var/www/certbot:/var/www/certbot \
-              certbot/certbot certonly \
-              --webroot \
-              -w /var/www/certbot \
-              -d $APP_DOMAIN \
-              --email $APP_EMAIL \
-              --agree-tos \
-              --no-eff-email \
-              --non-interactive \
-              --keep-until-expiring
-
-            # 8. Switch to HTTPS config
-            sed "s|placeholder|$APP_DOMAIN|g" \
-              nginx/conf.d/marzban.conf \
-              > nginx/conf.d/default.conf
-
-            # 9. Start full stack
-            sudo docker compose up -d --force-recreate marzban nginx
-            sudo docker compose exec -T nginx nginx -s reload
-
-            echo "====== DEPLOYMENT COMPLETE ======"
