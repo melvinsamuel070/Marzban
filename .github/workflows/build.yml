@@ -250,7 +250,7 @@
 
 
 
-nname: End-to-End Infrastructure & App Deployment
+name: End-to-End Infrastructure & App Deployment
 
 on:
   push:
@@ -397,7 +397,7 @@ jobs:
               CURRENT_IP=$(dig +short $APP_DOMAIN | head -n1)
               echo "Attempt $i/60 - DNS resolved to: ${CURRENT_IP:-'Not resolved yet'}"
               if [ "$CURRENT_IP" = "$VPS_IP" ]; then
-                echo "DNS is correct"
+                echo "✅ DNS is correct"
                 DNS_CORRECT=true
                 break
               fi
@@ -405,7 +405,7 @@ jobs:
             done
 
             if [ "$DNS_CORRECT" = false ]; then
-              echo "DNS propagation failed after 10 minutes. Exiting..."
+              echo "❌ DNS propagation failed after 10 minutes. Exiting..."
               exit 1
             fi
 
@@ -571,7 +571,6 @@ jobs:
               echo "✅ Marzban is available at: http://$APP_DOMAIN"
               echo "⚠️ Note: Running in HTTP mode. SSL will be enabled on next successful certificate request."
             fi
-
 
 
 
