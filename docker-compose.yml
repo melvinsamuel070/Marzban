@@ -3,13 +3,21 @@ services:
     image: ${DOCKER_USER}/marzban:latest
     container_name: marzban-production-marzban-1
     restart: always
+
     expose:
       - "8000"
+
     environment:
       - HOST=0.0.0.0
       - PORT=8000
+      - DEBUG=false
+
+    # 🔥 IMPORTANT: ensures app listens correctly inside Docker network
+    command: ["bash", "-c", "python main.py"]
+
     volumes:
       - /var/lib/marzban:/var/lib/marzban  # Critical for saving app states/users
+
     networks:
       marzban-net:
         aliases:
@@ -19,15 +27,19 @@ services:
     image: nginx:alpine
     container_name: marzban-production-nginx-1
     restart: always
+
     ports:
       - "80:80"
       - "443:443"
+
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d
       - /etc/letsencrypt:/etc/letsencrypt
       - /var/www/certbot:/var/www/certbot
+
     networks:
       - marzban-net
+
     depends_on:
       - marzban
 
@@ -37,8 +49,10 @@ services:
     volumes:
       - /etc/letsencrypt:/etc/letsencrypt
       - /var/www/certbot:/var/www/certbot
+
     networks:
       - marzban-net
+
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
 
 networks:
