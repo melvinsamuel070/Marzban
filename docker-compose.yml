@@ -6,8 +6,8 @@ services:
     expose:
       - "8000"
     environment:
-      - UVICORN_HOST=0.0.0.0
-      - UVICORN_PORT=8000
+      - HOST=0.0.0.0
+      - PORT=8000
     volumes:
       - /var/lib/marzban:/var/lib/marzban  # Critical for saving app states/users
     networks:
