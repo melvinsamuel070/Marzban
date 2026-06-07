@@ -1,29 +1,23 @@
-# services:
-#   marzban:
-#     image: gozargah/marzban:latest
-#     restart: always
-#     env_file: .env
-#     network_mode: host
-#     volumes:
-#       - /var/lib/marzban:/var/lib/marzban
-
-
-
-
 services:
   marzban:
     image: ${DOCKER_USER}/marzban:latest
+    container_name: marzban-production-marzban-1
     restart: always
     expose:
       - "8000"
-    networks:
-      - marzban-net
     environment:
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8000
+    volumes:
+      - /var/lib/marzban:/var/lib/marzban  # Critical for saving app states/users
+    networks:
+      marzban-net:
+        aliases:
+          - marzban
 
   nginx:
     image: nginx:alpine
+    container_name: marzban-production-nginx-1
     restart: always
     ports:
       - "80:80"
@@ -34,9 +28,12 @@ services:
       - /var/www/certbot:/var/www/certbot
     networks:
       - marzban-net
+    depends_on:
+      - marzban
 
   certbot:
     image: certbot/certbot
+    container_name: marzban-production-certbot-1
     volumes:
       - /etc/letsencrypt:/etc/letsencrypt
       - /var/www/certbot:/var/www/certbot
