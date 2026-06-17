@@ -11,6 +11,7 @@ services:
       - .env
     volumes:
       - ./data:/var/lib/marzban
+      - /var/run:/var/run  # Add this for socket communication
     networks:
       - production-net
 
