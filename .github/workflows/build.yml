@@ -88,7 +88,6 @@ jobs:
   deploy-and-secure:
     needs: [infrastructure, build-image]
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -121,44 +120,58 @@ jobs:
           DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
           DUCK_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
           VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
-
         with:
           host: ${{ needs.infrastructure.outputs.vps_ip }}
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
-
           script: |
             set -e
 
-            echo "🧨 HARD CLEAN DOCKER ENV (fix port 80 leaks)"
-            sudo docker stop $(sudo docker ps -q) 2>/dev/null || true
-            sudo docker rm $(sudo docker ps -aq) 2>/dev/null || true
-            sudo docker network prune -f || true
-            sudo systemctl restart docker
-            sleep 5
+            echo "📦 STEP 1: Ensure Docker exists BEFORE anything else"
+            if ! command -v docker &> /dev/null; then
+              sudo apt-get update -y
+              sudo apt-get install -y ca-certificates curl gnupg dnsutils
 
-            echo "Updating DuckDNS..."
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+              echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+              sudo apt-get update -y
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+              sudo systemctl enable docker
+              sudo systemctl start docker
+            fi
+
+            echo "🧨 STEP 2: SAFE Docker cleanup"
+            if command -v docker &> /dev/null; then
+              sudo docker stop $(sudo docker ps -q) 2>/dev/null || true
+              sudo docker rm $(sudo docker ps -aq) 2>/dev/null || true
+              sudo docker network prune -f || true
+              sudo systemctl restart docker || true
+              sleep 5
+            fi
+
+            echo "🌐 STEP 3: Update DuckDNS"
             SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
 
-            echo "Waiting for DNS propagation..."
+            echo "⏳ STEP 4: DNS propagation check"
             DNS_OK=false
-
             for i in {1..30}; do
               DNS1=$(dig @1.1.1.1 +short $APP_DOMAIN | head -n1)
               DNS2=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
               DNS3=$(dig @9.9.9.9 +short $APP_DOMAIN | head -n1)
 
-              echo "Attempt $i/30"
-              echo "CF: $DNS1 | Google: $DNS2 | Quad9: $DNS3"
+              echo "Attempt $i/30 → CF:$DNS1 | Google:$DNS2 | Quad9:$DNS3"
 
               if [ "$DNS1" = "$VPS_IP" ] && [ "$DNS2" = "$VPS_IP" ] && [ "$DNS3" = "$VPS_IP" ]; then
-                echo "DNS stabilized"
                 DNS_OK=true
                 break
               fi
-
               sleep 15
             done
 
@@ -167,23 +180,11 @@ jobs:
               exit 1
             fi
 
-            if ! command -v docker &> /dev/null; then
-              sudo apt-get update -y
-              sudo apt-get install -y ca-certificates curl gnupg dnsutils
-              sudo install -m 0755 -d /etc/apt/keyrings
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-              sudo chmod a+r /etc/apt/keyrings/docker.gpg
-              echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-              sudo apt-get update -y
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-            fi
-
-            echo "📦 Preparing deployment"
+            echo "📦 STEP 5: Prepare deployment folders"
             sudo mkdir -p /opt/marzban-production/nginx/conf.d
             sudo mkdir -p /opt/marzban-production/data
             sudo mkdir -p /etc/letsencrypt
             sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
-            sudo mkdir -p /var/lib/letsencrypt
 
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
             cd /opt/marzban-production
@@ -198,7 +199,7 @@ jobs:
             sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/default.conf
             sudo chmod -R 777 ./data
 
-            echo "Bootstrap nginx..."
+            echo "🔧 STEP 6: Bootstrap Nginx (HTTP only for certbot)"
             cat << 'EOF' > nginx/conf.d/default.conf.bootstrap
             server {
                 listen 80;
@@ -215,7 +216,7 @@ jobs:
             sudo docker compose up -d nginx
             sleep 5
 
-            echo "Requesting SSL..."
+            echo "🔐 STEP 7: SSL request"
             sudo docker run --rm \
               -v /etc/letsencrypt:/etc/letsencrypt \
               -v /var/www/certbot:/var/www/certbot \
@@ -235,15 +236,11 @@ jobs:
               exit 1
             fi
 
-            echo "🚀 Starting full stack..."
+            echo "🚀 STEP 8: Deploy full stack"
             sudo docker compose down
             sudo docker compose up -d --force-recreate --remove-orphans
 
-            echo "✅ Setup complete: https://$APP_DOMAIN/dashboard/"
-
-
-
-
+            echo "✅ DONE: https://$APP_DOMAIN/dashboard/"
 
 
 
