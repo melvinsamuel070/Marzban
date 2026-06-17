@@ -32,6 +32,9 @@ ENV PATH=/root/.local/bin:$PATH
 
 COPY . /code
 
+# FIX: Mock an empty JSON string to prevent marzban-cli initialization crashes during build-time compilation
+ENV XRAY_JSON="{}"
+
 RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
     && marzban-cli completion install --shell bash
