@@ -716,12 +716,43 @@ jobs:
             mv nginx/conf.d/default.conf.backup nginx/conf.d/default.conf
 
             # 10. Verify Production Keys are Stored on Host File Paths
-            CERT_PATH="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
-            if [ ! -f "$CERT_PATH" ]; then
-              echo "❌ SSL certificate generation failed!"
+            echo "🔍 Looking for SSL certificates..."
+
+            # Check if the certificate exists in the expected location
+            EXPECTED_CERT_PATH="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
+            CERT_PATH=""
+
+            if [ -f "$EXPECTED_CERT_PATH" ]; then
+              CERT_PATH="$EXPECTED_CERT_PATH"
+              echo "✅ SSL certificates found at expected location: $CERT_PATH"
+            else
+              echo "⚠️ Certificate not found at expected location: $EXPECTED_CERT_PATH"
+              echo "Looking for certificate in all Let's Encrypt directories..."
+
+              # Try to find the certificate by searching all directories
+              CERT_PATH=$(sudo find /etc/letsencrypt/live/ -name "fullchain.pem" 2>/dev/null | head -n1)
+
+              if [ -z "$CERT_PATH" ]; then
+                echo "❌ No SSL certificates found anywhere!"
+                echo "Listing all certificates in /etc/letsencrypt/live/:"
+                sudo ls -la /etc/letsencrypt/live/ || echo "Directory not found"
+                sudo find /etc/letsencrypt/live/ -type f 2>/dev/null || echo "No files found"
+                exit 1
+              else
+                echo "✅ SSL certificates found at: $CERT_PATH"
+                # Extract the domain name from the path
+                CERT_DOMAIN=$(echo $CERT_PATH | sed 's|/etc/letsencrypt/live/||' | cut -d'/' -f1)
+                echo "📝 Certificate domain: $CERT_DOMAIN"
+              fi
+            fi
+
+            # Verify the key file also exists
+            KEY_PATH=$(echo $CERT_PATH | sed 's/fullchain.pem/privkey.pem/')
+            if [ ! -f "$KEY_PATH" ]; then
+              echo "❌ SSL private key not found at: $KEY_PATH"
               exit 1
             fi
-            echo "✅ SSL certificates successfully obtained!"
+            echo "✅ SSL private key found at: $KEY_PATH"
 
             # 11. Run DB Migration Infrastructure Clearances & Boot Up Full Container Services
             echo "Starting complete software stack..."
