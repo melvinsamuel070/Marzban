@@ -21,11 +21,13 @@ jobs:
           pip install flake8
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
+
   infrastructure:
     needs: test-and-lint
     runs-on: ubuntu-latest
     outputs:
       vps_ip: ${{ steps.get_ip.outputs.vps_ip }}
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -50,13 +52,10 @@ jobs:
 
       - name: Extract VPS Public IP
         id: get_ip
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
         run: |
           cd terraform-ec2/
           echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+
 
   build-image:
     needs: test-and-lint
@@ -85,6 +84,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
 
+
   deploy-and-secure:
     needs: [infrastructure, build-image]
     runs-on: ubuntu-latest
@@ -93,23 +93,16 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Pre-clean remote environment (FULL RESET FIX)
+      - name: Pre-configure target directory permissions via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ needs.infrastructure.outputs.vps_ip }}
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            echo "🧨 FULL CLEAN (fix docker proxy + port 80 leak)"
-            sudo docker compose down --remove-orphans || true
-            sudo docker stop $(sudo docker ps -q) || true
-            sudo docker rm $(sudo docker ps -aq) || true
-            sudo docker network prune -f || true
-            sudo systemctl restart docker
-            sleep 5
+            sudo mkdir -p /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /opt/marzban-production
 
-            echo "VERIFY PORT 80 IS FREE"
-            sudo ss -tulpn | grep :80 || echo "OK - free"
 
       - name: Copy Stack Configurations to Target Host
         uses: appleboy/scp-action@v0.1.7
@@ -120,6 +113,7 @@ jobs:
           source: "docker-compose.yml,nginx/conf.d/default.conf"
           target: "/opt/marzban-production/"
           overwrite: true
+
 
       - name: Automated Bootstrapping via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -139,9 +133,18 @@ jobs:
           script: |
             set -e
 
+            echo "🧨 HARD CLEAN DOCKER ENV"
+            sudo docker stop $(sudo docker ps -q) 2>/dev/null || true
+            sudo docker rm $(sudo docker ps -aq) 2>/dev/null || true
+            sudo docker network prune -f || true
+            sudo systemctl restart docker
+            sleep 5
+
+
             echo "📡 Updating DuckDNS..."
             SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
+
 
             echo "⏳ Waiting for DNS convergence..."
             DNS_OK=false
@@ -166,31 +169,49 @@ jobs:
               exit 1
             fi
 
-            echo "📦 Preparing deployment folders"
-            sudo mkdir -p /opt/marzban-production/nginx/conf.d
-            sudo mkdir -p /opt/marzban-production/data
 
+            echo "📦 Preparing deployment"
+            sudo mkdir -p /opt/marzban-production/nginx/conf.d
+            sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /var/www/certbot
+
+
             cd /opt/marzban-production
 
-            echo "🚀 Start ONLY nginx first (critical fix)"
+
+            echo "🚀 Starting nginx only (bootstrap)"
             sudo docker compose up -d nginx
-            sleep 10
 
-            echo "🌐 HTTP check before SSL"
-            curl -I http://$APP_DOMAIN || echo "WARN: not reachable yet"
 
-            echo "🔐 Requesting SSL..."
-            sudo docker run --rm \
-              -v /etc/letsencrypt:/etc/letsencrypt \
-              -v /var/www/certbot:/var/www/certbot \
-              certbot/certbot certonly --webroot \
-              --webroot-path=/var/www/certbot \
-              -d $APP_DOMAIN \
-              --email $APP_EMAIL \
-              --agree-tos \
-              --no-eff-email \
-              --non-interactive
+            echo "⏳ Waiting for nginx to be reachable..."
+            for i in {1..20}; do
+              if curl -s -o /dev/null -w "%{http_code}" http://$VPS_IP | grep -q "200\|404"; then
+                echo "✅ Nginx is reachable"
+                break
+              fi
+              echo "Attempt $i/20 - waiting for nginx"
+              sleep 5
+            done
+
+
+            echo "🔐 Requesting SSL (certbot retry mode)"
+            for i in {1..3}; do
+              sudo docker run --rm \
+                -v /etc/letsencrypt:/etc/letsencrypt \
+                -v /var/www/certbot:/var/www/certbot \
+                certbot/certbot certonly --webroot \
+                --webroot-path=/var/www/certbot \
+                -d $APP_DOMAIN \
+                --email $APP_EMAIL \
+                --agree-tos \
+                --no-eff-email \
+                --non-interactive && break
+
+              echo "Retrying certbot ($i/3)..."
+              sleep 10
+            done
+
 
             CERT="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
             if [ ! -f "$CERT" ]; then
@@ -198,9 +219,11 @@ jobs:
               exit 1
             fi
 
+
             echo "🚀 Starting full stack"
             sudo docker compose down
             sudo docker compose up -d --force-recreate --remove-orphans
+
 
             echo "✅ DEPLOYMENT COMPLETE: https://$APP_DOMAIN/dashboard/"
 
