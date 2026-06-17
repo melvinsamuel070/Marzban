@@ -32,11 +32,11 @@ ENV PATH=/root/.local/bin:$PATH
 
 COPY . /code
 
-# FIX: Write a direct JSON string fallback into the environment variables using clean escaping
-ENV XRAY_JSON="{\"inbounds\":[]}"
-
+# Create symlink but skip completion installation
 RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
-    && chmod +x /usr/bin/marzban-cli \
-    && marzban-cli completion install --shell bash
+    && chmod +x /usr/bin/marzban-cli
+
+# Completion installation is skipped to avoid build-time config validation
+# You can install completion manually after deployment if needed
 
 CMD ["bash", "-c", "alembic upgrade head; python main.py"]
