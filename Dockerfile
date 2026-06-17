@@ -32,8 +32,8 @@ ENV PATH=/root/.local/bin:$PATH
 
 COPY . /code
 
-# FIX: Mock an empty JSON string to prevent marzban-cli initialization crashes during build-time compilation
-ENV XRAY_JSON="{}"
+# FIX: Provide a minimal valid Xray configuration structure to pass build-time validation
+ENV XRAY_JSON='{"inbounds": []}'
 
 RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
