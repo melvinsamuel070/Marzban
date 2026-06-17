@@ -135,20 +135,37 @@ jobs:
             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
 
             # 2. Wait for Stable Authoritative DNS Propagation
-            echo "Waiting for stable authoritative DNS propagation..."
+            echo "Waiting for stable DNS propagation across major resolvers..."
             DNS_CORRECT=false
-            for i in {1..30}; do
-              CURRENT_IP=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
-              echo "Attempt $i/30 - Public DNS resolved to: ${CURRENT_IP:-'Not resolved yet'}"
-              if [ "$CURRENT_IP" = "$VPS_IP" ]; then
-                DNS_CORRECT=true
-                break
+
+            for i in {1..40}; do
+              DNS1=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
+              DNS2=$(dig @1.1.1.1 +short $APP_DOMAIN | head -n1)
+              DNS3=$(dig @9.9.9.9 +short $APP_DOMAIN | head -n1)
+
+              echo "Attempt $i/40"
+              echo "Google DNS     : ${DNS1:-Not resolved}"
+              echo "Cloudflare DNS : ${DNS2:-Not resolved}"
+              echo "Quad9 DNS      : ${DNS3:-Not resolved}"
+              echo "Expected VPS IP: $VPS_IP"
+
+              if [ "$DNS1" = "$VPS_IP" ] && \
+                 [ "$DNS2" = "$VPS_IP" ] && \
+                 [ "$DNS3" = "$VPS_IP" ]; then
+
+                  echo "✅ DNS propagation confirmed across all resolvers."
+                  
+                  # Additional safety wait
+                  sleep 120
+                  DNS_CORRECT=true
+                  break
               fi
-              sleep 15
+
+              sleep 30
             done
 
             if [ "$DNS_CORRECT" = false ]; then
-              echo "❌ DNS propagation failed. Exiting..."
+              echo "❌ DNS propagation failed."
               exit 1
             fi
 
@@ -166,7 +183,7 @@ jobs:
             fi
 
             # =============================================
-            # CLEANUP OLD CONTAINERS (ADD THIS SECTION)
+            # CLEANUP OLD CONTAINERS
             # =============================================
             echo "🧹 Cleaning up old containers that might conflict..."
             sudo docker stop sandbox-nginx marzban-local-nginx marzban-local-marzban 2>/dev/null || true
@@ -174,9 +191,9 @@ jobs:
 
             # Check if port 80 is free
             echo "🔍 Checking if port 80 is available..."
-            if sudo netstat -tulpn | grep -q ":80 .*LISTEN"; then
+                        if sudo ss -tulpn | grep -q ":80 "; then
               echo "⚠️ Port 80 is still in use by another container!"
-              sudo netstat -tulpn | grep ":80 .*LISTEN"
+                          sudo ss -tulpn | grep ":80 "
               echo "Attempting to stop the conflicting container..."
               CONFLICTING_CONTAINER=$(sudo docker ps --filter "publish=80" --format "{{.Names}}")
               if [ ! -z "$CONFLICTING_CONTAINER" ]; then
@@ -186,9 +203,9 @@ jobs:
             fi
 
             # Verify port 80 is free
-            if sudo netstat -tulpn | grep -q ":80 .*LISTEN"; then
+                        if sudo ss -tulpn | grep -q ":80 "; then
               echo "❌ Port 80 is still occupied. Cannot proceed!"
-              sudo netstat -tulpn | grep ":80 .*LISTEN"
+                          sudo ss -tulpn | grep ":80 "
               exit 1
             else
               echo "✅ Port 80 is free!"
@@ -311,7 +328,6 @@ jobs:
 
             echo "====== Pipeline Processing Cycle Completed Successfully ======"
             echo "🚀 Production panel URL is live at: https://$APP_DOMAIN/dashboard/"
-
 
 
 
