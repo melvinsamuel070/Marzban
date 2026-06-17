@@ -997,7 +997,7 @@ jobs:
 
             # Swap configs to execute bootstrap initialization
             mv nginx/conf.d/default.conf nginx/conf.d/default.conf.backup
-            mv nginx/conf.d/default.conf.bootstrap nginx/conf.d/default.conf
+            mv nginx/conf.d/marzban.conf.bootstrap nginx/conf.d/default.conf
 
             echo "Starting Nginx in bootstrap challenge verification state..."
             sudo docker compose pull nginx
