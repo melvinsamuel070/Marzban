@@ -977,7 +977,7 @@ jobs:
             EOF
 
             # 6. Inject the Active Domain Parameters into the Copied Layout Configurations
-            sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/marzban.conf
+            # sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/default.conf
 
             # 7. Safe Host Security Clearance Execution Permissions
             sudo chmod -R 777 ./data
