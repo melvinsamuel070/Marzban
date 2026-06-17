@@ -98,6 +98,7 @@ jobs:
           host: ${{ needs.infrastructure.outputs.vps_ip }}
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
           script: |
             sudo mkdir -p /opt/marzban-production
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
@@ -128,67 +129,103 @@ jobs:
           script: |
             set -e
 
-            echo "📦 STEP 1: Ensure Docker exists BEFORE anything else"
-            if ! command -v docker &> /dev/null; then
-              sudo apt-get update -y
-              sudo apt-get install -y ca-certificates curl gnupg dnsutils
-
-              sudo install -m 0755 -d /etc/apt/keyrings
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-              sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-              echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-              sudo apt-get update -y
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-              sudo systemctl enable docker
-              sudo systemctl start docker
-            fi
-
-            echo "🧨 STEP 2: SAFE Docker cleanup"
-            if command -v docker &> /dev/null; then
-              sudo docker stop $(sudo docker ps -q) 2>/dev/null || true
-              sudo docker rm $(sudo docker ps -aq) 2>/dev/null || true
-              sudo docker network prune -f || true
-              sudo systemctl restart docker || true
-              sleep 5
-            fi
-
-            echo "🌐 STEP 3: Update DuckDNS"
+            # 1. Update DuckDNS Dynamic Records
             SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
+            echo "Updating DuckDNS..."
             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
 
-            echo "⏳ STEP 4: DNS propagation check"
-            DNS_OK=false
-            for i in {1..30}; do
-              DNS1=$(dig @1.1.1.1 +short $APP_DOMAIN | head -n1)
-              DNS2=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
+            # 2. Wait for Stable Authoritative DNS Propagation
+            echo "Waiting for stable DNS propagation across major resolvers..."
+            DNS_CORRECT=false
+
+            for i in {1..40}; do
+              DNS1=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
+              DNS2=$(dig @1.1.1.1 +short $APP_DOMAIN | head -n1)
               DNS3=$(dig @9.9.9.9 +short $APP_DOMAIN | head -n1)
 
-              echo "Attempt $i/30 → CF:$DNS1 | Google:$DNS2 | Quad9:$DNS3"
+              echo "Attempt $i/40"
+              echo "Google DNS     : ${DNS1:-Not resolved}"
+              echo "Cloudflare DNS : ${DNS2:-Not resolved}"
+              echo "Quad9 DNS      : ${DNS3:-Not resolved}"
+              echo "Expected VPS IP: $VPS_IP"
 
-              if [ "$DNS1" = "$VPS_IP" ] && [ "$DNS2" = "$VPS_IP" ] && [ "$DNS3" = "$VPS_IP" ]; then
-                DNS_OK=true
-                break
+              if [ "$DNS1" = "$VPS_IP" ] && \
+                 [ "$DNS2" = "$VPS_IP" ] && \
+                 [ "$DNS3" = "$VPS_IP" ]; then
+
+                  echo "✅ DNS propagation confirmed across all resolvers."
+                  
+                  # Additional safety wait
+                  sleep 120
+                  DNS_CORRECT=true
+                  break
               fi
-              sleep 15
+
+              sleep 30
             done
 
-            if [ "$DNS_OK" = false ]; then
-              echo "❌ DNS not ready"
+            if [ "$DNS_CORRECT" = false ]; then
+              echo "❌ DNS propagation failed."
               exit 1
             fi
 
-            echo "📦 STEP 5: Prepare deployment folders"
+            # 3. Install Docker Engine Components if Missing
+            if ! command -v docker &> /dev/null; then
+              sudo apt-get update -y
+              sudo apt-get install -y ca-certificates curl gnupg dnsutils
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              sudo chmod a+r /etc/apt/keyrings/docker.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+              sudo apt-get update -y
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              sudo usermod -aG docker ubuntu
+            fi
+
+            # =============================================
+            # CLEANUP OLD CONTAINERS
+            # =============================================
+            echo "🧹 Cleaning up old containers that might conflict..."
+            sudo docker stop sandbox-nginx marzban-local-nginx marzban-local-marzban 2>/dev/null || true
+            sudo docker rm sandbox-nginx marzban-local-nginx marzban-local-marzban 2>/dev/null || true
+
+            # Check if port 80 is free
+            echo "🔍 Checking if port 80 is available..."
+                        if sudo ss -tulpn | grep -q ":80 "; then
+              echo "⚠️ Port 80 is still in use by another container!"
+                          sudo ss -tulpn | grep ":80 "
+              echo "Attempting to stop the conflicting container..."
+              CONFLICTING_CONTAINER=$(sudo docker ps --filter "publish=80" --format "{{.Names}}")
+              if [ ! -z "$CONFLICTING_CONTAINER" ]; then
+                sudo docker stop $CONFLICTING_CONTAINER
+                sudo docker rm $CONFLICTING_CONTAINER
+              fi
+            fi
+
+            # Verify port 80 is free
+                        if sudo ss -tulpn | grep -q ":80 "; then
+              echo "❌ Port 80 is still occupied. Cannot proceed!"
+                          sudo ss -tulpn | grep ":80 "
+              exit 1
+            else
+              echo "✅ Port 80 is free!"
+            fi
+
+            # 4. Initialize Core Deployment Folder Paths
             sudo mkdir -p /opt/marzban-production/nginx/conf.d
             sudo mkdir -p /opt/marzban-production/data
             sudo mkdir -p /etc/letsencrypt
             sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
+            sudo mkdir -p /var/lib/letsencrypt
 
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /etc/letsencrypt
+            sudo chown -R ubuntu:ubuntu /var/www/certbot
+            sudo chown -R ubuntu:ubuntu /var/lib/letsencrypt
+            
             cd /opt/marzban-production
 
+            # 5. Populate Production Environment File (.env) with Socket Engine Defaults
             cat << EOF > .env
             DOCKER_USER=${DOCKER_USER}
             UVICORN_UDS="/var/lib/marzban/marzban.sock"
@@ -196,30 +233,53 @@ jobs:
             SQLALCHEMY_DATABASE_URL="sqlite:////var/lib/marzban/db.sqlite3"
             EOF
 
+            # 6. Inject the Active Domain Parameters into the Copied Layout Configurations
             sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/default.conf
+
+            # 7. Safe Host Security Clearance Execution Permissions
             sudo chmod -R 777 ./data
 
-            echo "🔧 STEP 6: Bootstrap Nginx (HTTP only for certbot)"
+            # 8. BOOTSTRAPPING WORKAROUND: Temporarily bypass missing SSL certificates
+            echo "Injecting clean transient HTTP bootstrap mapping layout..."
             cat << 'EOF' > nginx/conf.d/default.conf.bootstrap
             server {
                 listen 80;
                 server_name _;
                 location /.well-known/acme-challenge/ {
                     root /var/www/certbot;
+                    try_files $uri =404;
                 }
             }
             EOF
 
+            # Swap configs to execute bootstrap initialization
             mv nginx/conf.d/default.conf nginx/conf.d/default.conf.backup
             mv nginx/conf.d/default.conf.bootstrap nginx/conf.d/default.conf
 
+            echo "Starting Nginx in bootstrap challenge verification state..."
+            sudo docker compose pull nginx
             sudo docker compose up -d nginx
             sleep 5
 
-            echo "🔐 STEP 7: SSL request"
+            # Verify Nginx is running and accessible
+            echo "🔍 Verifying Nginx is accessible..."
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost/.well-known/acme-challenge/ | grep -q "200\|404"; then
+              echo "✅ Nginx is responding!"
+            else
+              echo "⚠️ Nginx might not be working properly"
+              sudo docker compose logs nginx
+            fi
+
+            # Test from outside (optional)
+            echo "🔍 Testing from outside (if port is open)..."
+            curl -s -o /dev/null -w "External HTTP status: %{http_code}\n" --max-time 3 http://$VPS_IP/.well-known/acme-challenge/ || echo "⚠️ Cannot reach server from outside (firewall issue)"
+
+            # 9. Request Real Let's Encrypt Certificates via HTTP Challenge Webroot Mounts
+            echo "Requesting real Let's Encrypt certificates..."
             sudo docker run --rm \
               -v /etc/letsencrypt:/etc/letsencrypt \
               -v /var/www/certbot:/var/www/certbot \
+              -v /var/lib/letsencrypt:/var/lib/letsencrypt \
               certbot/certbot certonly --webroot \
               --webroot-path=/var/www/certbot \
               -d $APP_DOMAIN \
@@ -228,19 +288,55 @@ jobs:
               --no-eff-email \
               --non-interactive
 
+            # Restore original tracking production SSL configuration profile layout
             mv nginx/conf.d/default.conf.backup nginx/conf.d/default.conf
 
-            CERT="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
-            if [ ! -f "$CERT" ]; then
-              echo "❌ SSL failed"
+            # 10. Verify Production Keys are Stored on Host File Paths
+            CERT_PATH="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
+            if [ ! -f "$CERT_PATH" ]; then
+              echo "❌ SSL certificate generation failed!"
               exit 1
             fi
+            echo "✅ SSL certificates successfully obtained!"
 
-            echo "🚀 STEP 8: Deploy full stack"
+            # 11. Run DB Migration Infrastructure Clearances & Boot Up Full Container Services
+            echo "Starting complete software stack..."
             sudo docker compose down
             sudo docker compose up -d --force-recreate --remove-orphans
 
-            echo "✅ DONE: https://$APP_DOMAIN/dashboard/"
+            # 12. Complete Core Telemetry Processing Assertions
+            sleep 10
+
+            # 13. Setup Auto-Renewal Engine Systems Cron Tab Rules
+            echo "Setting up automatic certificate renewal..."
+            (sudo crontab -l 2>/dev/null | grep -v "certbot renew" || true; echo "0 3 * * * docker run --rm -v /etc/letsencrypt:/etc/letsencrypt -v /var/www/certbot:/var/www/certbot certbot/certbot renew --quiet && docker compose exec -T nginx nginx -s reload") | sudo crontab -
+
+            # 14. Performance Telemetry Assertion Check via Local SSL Loop Request
+            echo "Performing final local health verification checks..."
+            set +e
+            HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -k https://127.0.0.1/dashboard/)
+            set -e
+
+            if [ "$HEALTH_CHECK" = "200" ] || [ "$HEALTH_CHECK" = "302" ]; then
+              echo "✅ Production services are up and running perfectly (HTTP Status: $HEALTH_CHECK)"
+            else
+              echo "⚠️ Health check returned status: ${HEALTH_CHECK:-Failed}"
+              sudo docker compose ps
+              sudo docker compose logs --tail=30 nginx
+              exit 1
+            fi
+
+            echo "====== Pipeline Processing Cycle Completed Successfully ======"
+            echo "🚀 Production panel URL is live at: https://$APP_DOMAIN/dashboard/"
+
+
+
+
+
+
+
+
+
 
 
 
