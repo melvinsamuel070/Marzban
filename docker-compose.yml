@@ -5,15 +5,21 @@ services:
     image: gozargah/marzban:latest
     container_name: marzban-production-engine
     restart: always
-    expose:
-      - "8000"
     env_file:
       - .env
     volumes:
       - ./data:/var/lib/marzban
-      - /var/run:/var/run  # Add this for socket communication
+    # Expose for internal network only (no host port needed)
+    expose:
+      - "8000"
     networks:
       - production-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   nginx:
     image: nginx:alpine
@@ -23,14 +29,16 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d
-      - ./data:/var/lib/marzban
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./data:/var/lib/marzban:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /var/www/certbot:/var/www/certbot:ro
+      - /var/lib/letsencrypt:/var/lib/letsencrypt:ro
     networks:
       - production-net
     depends_on:
-      - marzban
+      marzban:
+        condition: service_healthy
 
 networks:
   production-net:
