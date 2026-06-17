@@ -1,60 +1,36 @@
+version: "3.8"
+
 services:
   marzban:
-    image: ${DOCKER_USER}/marzban:latest
-    container_name: marzban-production-marzban-1
+    image: gozargah/marzban:latest
+    container_name: marzban-production-engine
     restart: always
-
     expose:
       - "8000"
-
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8000
-      - DEBUG=false
-
-    # 🔥 IMPORTANT: ensures app listens correctly inside Docker network
-    command: ["bash", "-c", "python main.py"]
-
+    env_file:
+      - .env
     volumes:
-      - /var/lib/marzban:/var/lib/marzban  # Critical for saving app states/users
-
+      - ./data:/var/lib/marzban
     networks:
-      marzban-net:
-        aliases:
-          - marzban
+      - production-net
 
   nginx:
     image: nginx:alpine
-    container_name: marzban-production-nginx-1
+    container_name: marzban-production-nginx
     restart: always
-
     ports:
       - "80:80"
       - "443:443"
-
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d
-      - /etc/letsencrypt:/etc/letsencrypt
-      - /var/www/certbot:/var/www/certbot
-
+      - ./data:/var/lib/marzban
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
     networks:
-      - marzban-net
-
+      - production-net
     depends_on:
       - marzban
 
-  certbot:
-    image: certbot/certbot
-    container_name: marzban-production-certbot-1
-    volumes:
-      - /etc/letsencrypt:/etc/letsencrypt
-      - /var/www/certbot:/var/www/certbot
-
-    networks:
-      - marzban-net
-
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-
 networks:
-  marzban-net:
+  production-net:
     driver: bridge
