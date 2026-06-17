@@ -88,6 +88,7 @@ jobs:
   deploy-and-secure:
     needs: [infrastructure, build-image]
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -120,32 +121,39 @@ jobs:
           DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
           DUCK_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
           VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
+
         with:
           host: ${{ needs.infrastructure.outputs.vps_ip }}
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
+
           script: |
             set -e
+
+            echo "🧨 HARD CLEAN DOCKER ENV (fix port 80 leaks)"
+            sudo docker stop $(sudo docker ps -q) 2>/dev/null || true
+            sudo docker rm $(sudo docker ps -aq) 2>/dev/null || true
+            sudo docker network prune -f || true
+            sudo systemctl restart docker
+            sleep 5
 
             echo "Updating DuckDNS..."
             SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
             curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
 
             echo "Waiting for DNS propagation..."
-            sleep 120
-
             DNS_OK=false
 
-            for i in {1..20}; do
+            for i in {1..30}; do
               DNS1=$(dig @1.1.1.1 +short $APP_DOMAIN | head -n1)
               DNS2=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
+              DNS3=$(dig @9.9.9.9 +short $APP_DOMAIN | head -n1)
 
-              echo "Attempt $i/20"
-              echo "Cloudflare: $DNS1"
-              echo "Google    : $DNS2"
+              echo "Attempt $i/30"
+              echo "CF: $DNS1 | Google: $DNS2 | Quad9: $DNS3"
 
-              if [ "$DNS1" = "$VPS_IP" ] && [ "$DNS2" = "$VPS_IP" ]; then
+              if [ "$DNS1" = "$VPS_IP" ] && [ "$DNS2" = "$VPS_IP" ] && [ "$DNS3" = "$VPS_IP" ]; then
                 echo "DNS stabilized"
                 DNS_OK=true
                 break
@@ -168,22 +176,9 @@ jobs:
               echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
               sudo apt-get update -y
               sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-              sudo usermod -aG docker ubuntu
             fi
 
-            echo "Cleaning containers..."
-            sudo docker stop sandbox-nginx marzban-local-nginx marzban-local-marzban 2>/dev/null || true
-            sudo docker rm sandbox-nginx marzban-local-nginx marzban-local-marzban 2>/dev/null || true
-
-            echo "Checking port 80..."
-            if sudo ss -tulpn | grep -q ":80 "; then
-              echo "Port 80 in use"
-              sudo ss -tulpn | grep ":80 "
-              exit 1
-            fi
-
-            echo "Port 80 is free"
-
+            echo "📦 Preparing deployment"
             sudo mkdir -p /opt/marzban-production/nginx/conf.d
             sudo mkdir -p /opt/marzban-production/data
             sudo mkdir -p /etc/letsencrypt
@@ -191,7 +186,6 @@ jobs:
             sudo mkdir -p /var/lib/letsencrypt
 
             sudo chown -R ubuntu:ubuntu /opt/marzban-production
-
             cd /opt/marzban-production
 
             cat << EOF > .env
@@ -202,7 +196,6 @@ jobs:
             EOF
 
             sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/default.conf
-
             sudo chmod -R 777 ./data
 
             echo "Bootstrap nginx..."
@@ -238,19 +231,15 @@ jobs:
 
             CERT="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
             if [ ! -f "$CERT" ]; then
-              echo "SSL failed"
+              echo "❌ SSL failed"
               exit 1
             fi
 
-            echo "Starting full stack..."
+            echo "🚀 Starting full stack..."
             sudo docker compose down
-            sudo docker compose up -d --force-recreate
+            sudo docker compose up -d --force-recreate --remove-orphans
 
-            echo "Setup complete: https://$APP_DOMAIN/dashboard/"
-
-
-
-
+            echo "✅ Setup complete: https://$APP_DOMAIN/dashboard/"
 
 
 
