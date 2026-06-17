@@ -652,7 +652,8 @@ jobs:
             # 5. Populate Production Environment File (.env) with Socket Engine Defaults
             cat << EOF > .env
             DOCKER_USER=${DOCKER_USER}
-            UVICORN_UDS="/var/lib/marzban/marzban.sock"
+            UVICORN_HOST="0.0.0.0"
+            UVICORN_PORT=8000
             XRAY_JSON="/var/lib/marzban/xray_config.json"
             SQLALCHEMY_DATABASE_URL="sqlite:////var/lib/marzban/db.sqlite3"
             EOF
