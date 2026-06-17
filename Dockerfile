@@ -32,8 +32,8 @@ ENV PATH=/root/.local/bin:$PATH
 
 COPY . /code
 
-# FIX: Provide a minimal valid Xray configuration structure to pass build-time validation
-ENV XRAY_JSON='{"inbounds": []}'
+# FIX: Write a direct JSON string fallback into the environment variables using clean escaping
+ENV XRAY_JSON="{\"inbounds\":[]}"
 
 RUN ln -s /code/marzban-cli.py /usr/bin/marzban-cli \
     && chmod +x /usr/bin/marzban-cli \
