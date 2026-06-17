@@ -9,17 +9,16 @@ services:
       - .env
     volumes:
       - ./data:/var/lib/marzban
-    # Expose for internal network only (no host port needed)
     expose:
       - "8000"
     networks:
       - production-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+      test: ["CMD", "curl", "-f", "-s", "http://localhost:8000/dashboard/"]   # Marzban uses /dashboard/
+      interval: 12s
+      timeout: 8s
+      retries: 8
+      start_period: 25s
 
   nginx:
     image: nginx:alpine
