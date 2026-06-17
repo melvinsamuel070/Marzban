@@ -418,93 +418,6 @@
 
 
 
-name: End-to-End Infrastructure & App Deployment
-
-on:
-  push:
-    branches: [ master ]
-
-jobs:
-  test-and-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Run Syntax Checks
-        run: |
-          pip install flake8
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-
-  infrastructure:
-    needs: test-and-lint
-    runs-on: ubuntu-latest
-    outputs:
-      vps_ip: ${{ steps.get_ip.outputs.vps_ip }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
-
-      - name: Terraform Init & Apply
-        env:
-          TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }}
-          TF_VAR_instance_name: "marzban-production-server"
-          TF_VAR_instance_type: "t3.medium"
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          cd terraform-ec2/
-          terraform init
-          terraform apply -auto-approve
-
-      - name: Extract VPS Public IP
-        id: get_ip
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          cd terraform-ec2/
-          echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
-
-  build-image:
-    needs: test-and-lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and Push Multi-Arch Container
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
-
   deploy-and-secure:
     needs: [infrastructure, build-image]
     runs-on: ubuntu-latest
@@ -589,30 +502,26 @@ jobs:
               exit 1
             fi
 
-            # 3. Install Docker Engine Components if Missing or Fix GPG Key
+            # 3. Fix Docker GPG Key First (always run this)
+            echo "🔑 Ensuring Docker GPG key is correct..."
+            sudo mkdir -p /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+            sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+            # Update the apt source with correct key
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            # Now check if Docker is installed
             if ! command -v docker &> /dev/null; then
               echo "🐳 Installing Docker..."
-              sudo apt-get update -y
-              sudo apt-get install -y ca-certificates curl gnupg dnsutils
-              sudo install -m 0755 -d /etc/apt/keyrings
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
-              sudo chmod a+r /etc/apt/keyrings/docker.gpg
-              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
               sudo apt-get update -y
               sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
               sudo usermod -aG docker ubuntu
             else
-              echo "✅ Docker already installed, fixing GPG key..."
-              # Fix the GPG key issue
-              sudo mkdir -p /etc/apt/keyrings
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
-              sudo chmod a+r /etc/apt/keyrings/docker.gpg
-              
-              # Update the apt source with correct key
-              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-              
-              # Update apt to verify the fix
+              echo "✅ Docker already installed, verifying..."
               sudo apt-get update -y
+              # Just verify Docker works
+              docker --version
             fi
 
             # =============================================
