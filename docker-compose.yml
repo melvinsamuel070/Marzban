@@ -7,18 +7,17 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: 8000
     volumes:
       - ./data:/var/lib/marzban
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
     networks:
       - production-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "-s", "http://localhost:8000/dashboard/"]   # Marzban uses /dashboard/
-      interval: 12s
-      timeout: 8s
-      retries: 8
-      start_period: 25s
+      disable: true
 
   nginx:
     image: nginx:alpine
@@ -36,8 +35,7 @@ services:
     networks:
       - production-net
     depends_on:
-      marzban:
-        condition: service_healthy
+      - marzban
 
 networks:
   production-net:
