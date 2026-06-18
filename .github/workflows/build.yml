@@ -1,3 +1,310 @@
+name: End-to-End Infrastructure & App Deployment
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Run Syntax Checks
+        run: |
+          pip install flake8
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  infrastructure:
+    needs: test-and-lint
+    runs-on: ubuntu-latest
+    outputs:
+      vps_ip: ${{ steps.get_ip.outputs.vps_ip }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init & Apply
+        env:
+          TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }}
+          TF_VAR_instance_name: "marzban-production-server"
+          TF_VAR_instance_type: "t3.medium"
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          cd terraform-ec2/
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Extract VPS Public IP
+        id: get_ip
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          cd terraform-ec2/
+          echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+
+  build-image:
+    needs: test-and-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Multi-Arch Container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
+
+  deploy-and-secure:
+    needs: [infrastructure, build-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Pre-configure target directory permissions via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ needs.infrastructure.outputs.vps_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            sudo mkdir -p /opt/marzban-production
+            sudo chown -R ubuntu:ubuntu /opt/marzban-production
+
+      - name: Copy Stack Configurations to Target Host
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ needs.infrastructure.outputs.vps_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml,nginx/conf.d/default.conf"
+          target: "/opt/marzban-production/"
+          overwrite: true
+
+      - name: Automated Bootstrapping via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          APP_DOMAIN: ${{ secrets.DOMAIN }}
+          APP_EMAIL: ${{ secrets.EMAIL }}
+          DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
+          DUCK_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
+          VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
+        with:
+          host: ${{ needs.infrastructure.outputs.vps_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
+          script: |
+            set -e
+
+            # ===============================
+            # DNS + SERVER PREP (UNCHANGED)
+            # ===============================
+            SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
+            curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
+
+            # ===============================
+            # INSTALL DOCKER (UNCHANGED)
+            # ===============================
+            sudo mkdir -p /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+            sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            if ! command -v docker &> /dev/null; then
+              sudo apt-get update -y
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            fi
+
+            # ===============================
+            # CORE FIX: MARZBAN DATA BOOTSTRAP
+            # ===============================
+            echo "🔧 Ensuring Marzban runtime files..."
+
+            cd /opt/marzban-production
+            mkdir -p data
+
+            if [ ! -f data/xray_config.json ]; then
+              echo "⚠️ Missing xray_config.json → restoring from image"
+
+              TEMP=$(docker create gozargah/marzban:latest)
+              docker cp $TEMP:/code/xray_config.json data/xray_config.json || true
+              docker rm $TEMP
+
+              if [ ! -f data/xray_config.json ]; then
+                echo "❌ Failed to bootstrap xray_config.json"
+                exit 1
+              fi
+
+              echo "✅ xray_config.json restored"
+            else
+              echo "✅ xray_config.json already exists"
+            fi
+
+            sudo chown -R ubuntu:ubuntu /opt/marzban-production
+
+            # ===============================
+            # ENV FILE
+            # ===============================
+            cat << EOF > .env
+            DOCKER_USER=${DOCKER_USER}
+            UVICORN_HOST=0.0.0.0
+            UVICORN_PORT=8000
+            XRAY_JSON=/var/lib/marzban/xray_config.json
+            SQLALCHEMY_DATABASE_URL=sqlite:////var/lib/marzban/db.sqlite3
+            EOF
+
+            # ===============================
+            # NGINX + SSL FLOW (UNCHANGED)
+            # ===============================
+            sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/default.conf
+
+            echo "Bootstrapping nginx..."
+            mv nginx/conf.d/default.conf nginx/conf.d/default.conf.backup || true
+
+            cat << 'EOF' > nginx/conf.d/default.conf
+            server {
+                listen 80;
+                server_name _;
+                location /.well-known/acme-challenge/ {
+                    root /var/www/certbot;
+                }
+            }
+            EOF
+
+            sudo docker compose up -d nginx
+
+            # ===============================
+            # FULL STACK START
+            # ===============================
+            sudo docker compose down
+            sudo docker compose up -d --force-recreate --remove-orphans
+
+            echo "====== DEPLOYMENT COMPLETE ======"
+            echo "🚀 https://$APP_DOMAIN/dashboard/"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # name: End-to-End Infrastructure & App Deployment
 
 # on:
@@ -152,15 +459,11 @@
 #               if [ "$DNS1" = "$VPS_IP" ] && \
 #                  [ "$DNS2" = "$VPS_IP" ] && \
 #                  [ "$DNS3" = "$VPS_IP" ]; then
-
 #                   echo "✅ DNS propagation confirmed across all resolvers."
-                  
-#                   # Additional safety wait
 #                   sleep 120
 #                   DNS_CORRECT=true
 #                   break
 #               fi
-
 #               sleep 30
 #             done
 
@@ -169,17 +472,25 @@
 #               exit 1
 #             fi
 
-#             # 3. Install Docker Engine Components if Missing
+#             # 3. Fix Docker GPG Key First (always run this)
+#             echo "🔑 Ensuring Docker GPG key is correct..."
+#             sudo mkdir -p /etc/apt/keyrings
+#             curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+#             sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+#             # Update the apt source with correct key
+#             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+#             # Now check if Docker is installed
 #             if ! command -v docker &> /dev/null; then
-#               sudo apt-get update -y
-#               sudo apt-get install -y ca-certificates curl gnupg dnsutils
-#               sudo install -m 0755 -d /etc/apt/keyrings
-#               curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
-#               sudo chmod a+r /etc/apt/keyrings/docker.gpg
-#               echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+#               echo "🐳 Installing Docker..."
 #               sudo apt-get update -y
 #               sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 #               sudo usermod -aG docker ubuntu
+#             else
+#               echo "✅ Docker already installed, verifying..."
+#               sudo apt-get update -y
+#               docker --version
 #             fi
 
 #             # =============================================
@@ -222,13 +533,14 @@
 #             sudo chown -R ubuntu:ubuntu /etc/letsencrypt
 #             sudo chown -R ubuntu:ubuntu /var/www/certbot
 #             sudo chown -R ubuntu:ubuntu /var/lib/letsencrypt
-            
+
 #             cd /opt/marzban-production
 
 #             # 5. Populate Production Environment File (.env) with Socket Engine Defaults
 #             cat << EOF > .env
 #             DOCKER_USER=${DOCKER_USER}
-#             UVICORN_UDS="/var/lib/marzban/marzban.sock"
+#             UVICORN_HOST="0.0.0.0"
+#             UVICORN_PORT=8000
 #             XRAY_JSON="/var/lib/marzban/xray_config.json"
 #             SQLALCHEMY_DATABASE_URL="sqlite:////var/lib/marzban/db.sqlite3"
 #             EOF
@@ -292,12 +604,43 @@
 #             mv nginx/conf.d/default.conf.backup nginx/conf.d/default.conf
 
 #             # 10. Verify Production Keys are Stored on Host File Paths
-#             CERT_PATH="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
-#             if [ ! -f "$CERT_PATH" ]; then
-#               echo "❌ SSL certificate generation failed!"
+#             echo "🔍 Looking for SSL certificates..."
+
+#             # Check if the certificate exists in the expected location
+#             EXPECTED_CERT_PATH="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
+#             CERT_PATH=""
+
+#             if [ -f "$EXPECTED_CERT_PATH" ]; then
+#               CERT_PATH="$EXPECTED_CERT_PATH"
+#               echo "✅ SSL certificates found at expected location: $CERT_PATH"
+#             else
+#               echo "⚠️ Certificate not found at expected location: $EXPECTED_CERT_PATH"
+#               echo "Looking for certificate in all Let's Encrypt directories..."
+
+#               # Try to find the certificate by searching all directories
+#               CERT_PATH=$(sudo find /etc/letsencrypt/live/ -name "fullchain.pem" 2>/dev/null | head -n1)
+
+#               if [ -z "$CERT_PATH" ]; then
+#                 echo "❌ No SSL certificates found anywhere!"
+#                 echo "Listing all certificates in /etc/letsencrypt/live/:"
+#                 sudo ls -la /etc/letsencrypt/live/ || echo "Directory not found"
+#                 sudo find /etc/letsencrypt/live/ -type f 2>/dev/null || echo "No files found"
+#                 exit 1
+#               else
+#                 echo "✅ SSL certificates found at: $CERT_PATH"
+#                 # Extract the domain name from the path
+#                 CERT_DOMAIN=$(echo $CERT_PATH | sed 's|/etc/letsencrypt/live/||' | cut -d'/' -f1)
+#                 echo "📝 Certificate domain: $CERT_DOMAIN"
+#               fi
+#             fi
+
+#             # Verify the key file also exists
+#             KEY_PATH=$(echo $CERT_PATH | sed 's/fullchain.pem/privkey.pem/')
+#             if [ ! -f "$KEY_PATH" ]; then
+#               echo "❌ SSL private key not found at: $KEY_PATH"
 #               exit 1
 #             fi
-#             echo "✅ SSL certificates successfully obtained!"
+#             echo "✅ SSL private key found at: $KEY_PATH"
 
 #             # 11. Run DB Migration Infrastructure Clearances & Boot Up Full Container Services
 #             echo "Starting complete software stack..."
@@ -328,459 +671,3 @@
 
 #             echo "====== Pipeline Processing Cycle Completed Successfully ======"
 #             echo "🚀 Production panel URL is live at: https://$APP_DOMAIN/dashboard/"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-name: End-to-End Infrastructure & App Deployment
-
-on:
-  push:
-    branches: [ master ]
-
-jobs:
-  test-and-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Run Syntax Checks
-        run: |
-          pip install flake8
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-
-  infrastructure:
-    needs: test-and-lint
-    runs-on: ubuntu-latest
-    outputs:
-      vps_ip: ${{ steps.get_ip.outputs.vps_ip }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
-
-      - name: Terraform Init & Apply
-        env:
-          TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }}
-          TF_VAR_instance_name: "marzban-production-server"
-          TF_VAR_instance_type: "t3.medium"
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          cd terraform-ec2/
-          terraform init
-          terraform apply -auto-approve
-
-      - name: Extract VPS Public IP
-        id: get_ip
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          cd terraform-ec2/
-          echo "vps_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
-
-  build-image:
-    needs: test-and-lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and Push Multi-Arch Container
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ secrets.DOCKER_USERNAME }}/marzban:latest
-
-  deploy-and-secure:
-    needs: [infrastructure, build-image]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Pre-configure target directory permissions via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ needs.infrastructure.outputs.vps_ip }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          script: |
-            sudo mkdir -p /opt/marzban-production
-            sudo chown -R ubuntu:ubuntu /opt/marzban-production
-
-      - name: Copy Stack Configurations to Target Host
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ needs.infrastructure.outputs.vps_ip }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml,nginx/conf.d/default.conf"
-          target: "/opt/marzban-production/"
-          overwrite: true
-
-      - name: Automated Bootstrapping via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        env:
-          APP_DOMAIN: ${{ secrets.DOMAIN }}
-          APP_EMAIL: ${{ secrets.EMAIL }}
-          DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
-          DUCK_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
-          VPS_IP: ${{ needs.infrastructure.outputs.vps_ip }}
-        with:
-          host: ${{ needs.infrastructure.outputs.vps_ip }}
-          username: ubuntu
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: APP_DOMAIN,APP_EMAIL,DOCKER_USER,DUCK_TOKEN,VPS_IP
-          script: |
-            set -e
-
-            # 1. Update DuckDNS Dynamic Records
-            SUBDOMAIN=$(echo $APP_DOMAIN | cut -d'.' -f1)
-            echo "Updating DuckDNS..."
-            curl -fsS "https://www.duckdns.org/update?domains=$SUBDOMAIN&token=$DUCK_TOKEN&ip=$VPS_IP"
-
-            # 2. Wait for Stable Authoritative DNS Propagation
-            echo "Waiting for stable DNS propagation across major resolvers..."
-            DNS_CORRECT=false
-
-            for i in {1..40}; do
-              DNS1=$(dig @8.8.8.8 +short $APP_DOMAIN | head -n1)
-              DNS2=$(dig @1.1.1.1 +short $APP_DOMAIN | head -n1)
-              DNS3=$(dig @9.9.9.9 +short $APP_DOMAIN | head -n1)
-
-              echo "Attempt $i/40"
-              echo "Google DNS     : ${DNS1:-Not resolved}"
-              echo "Cloudflare DNS : ${DNS2:-Not resolved}"
-              echo "Quad9 DNS      : ${DNS3:-Not resolved}"
-              echo "Expected VPS IP: $VPS_IP"
-
-              if [ "$DNS1" = "$VPS_IP" ] && \
-                 [ "$DNS2" = "$VPS_IP" ] && \
-                 [ "$DNS3" = "$VPS_IP" ]; then
-                  echo "✅ DNS propagation confirmed across all resolvers."
-                  sleep 120
-                  DNS_CORRECT=true
-                  break
-              fi
-              sleep 30
-            done
-
-            if [ "$DNS_CORRECT" = false ]; then
-              echo "❌ DNS propagation failed."
-              exit 1
-            fi
-
-            # 3. Fix Docker GPG Key First (always run this)
-            echo "🔑 Ensuring Docker GPG key is correct..."
-            sudo mkdir -p /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
-            sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-            # Update the apt source with correct key
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-            # Now check if Docker is installed
-            if ! command -v docker &> /dev/null; then
-              echo "🐳 Installing Docker..."
-              sudo apt-get update -y
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-              sudo usermod -aG docker ubuntu
-            else
-              echo "✅ Docker already installed, verifying..."
-              sudo apt-get update -y
-              docker --version
-            fi
-
-            # =============================================
-            # CLEANUP OLD CONTAINERS
-            # =============================================
-            echo "🧹 Cleaning up old containers that might conflict..."
-            sudo docker stop sandbox-nginx marzban-local-nginx marzban-local-marzban 2>/dev/null || true
-            sudo docker rm sandbox-nginx marzban-local-nginx marzban-local-marzban 2>/dev/null || true
-
-            # Check if port 80 is free
-            echo "🔍 Checking if port 80 is available..."
-            if sudo ss -tulpn | grep -q ":80 "; then
-              echo "⚠️ Port 80 is still in use by another container!"
-              sudo ss -tulpn | grep ":80 "
-              echo "Attempting to stop the conflicting container..."
-              CONFLICTING_CONTAINER=$(sudo docker ps --filter "publish=80" --format "{{.Names}}")
-              if [ ! -z "$CONFLICTING_CONTAINER" ]; then
-                sudo docker stop $CONFLICTING_CONTAINER
-                sudo docker rm $CONFLICTING_CONTAINER
-              fi
-            fi
-
-            # Verify port 80 is free
-            if sudo ss -tulpn | grep -q ":80 "; then
-              echo "❌ Port 80 is still occupied. Cannot proceed!"
-              sudo ss -tulpn | grep ":80 "
-              exit 1
-            else
-              echo "✅ Port 80 is free!"
-            fi
-
-            # 4. Initialize Core Deployment Folder Paths
-            sudo mkdir -p /opt/marzban-production/nginx/conf.d
-            sudo mkdir -p /opt/marzban-production/data
-            sudo mkdir -p /etc/letsencrypt
-            sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
-            sudo mkdir -p /var/lib/letsencrypt
-
-            sudo chown -R ubuntu:ubuntu /opt/marzban-production
-            sudo chown -R ubuntu:ubuntu /etc/letsencrypt
-            sudo chown -R ubuntu:ubuntu /var/www/certbot
-            sudo chown -R ubuntu:ubuntu /var/lib/letsencrypt
-
-            cd /opt/marzban-production
-
-            # 5. Populate Production Environment File (.env) with Socket Engine Defaults
-            cat << EOF > .env
-            DOCKER_USER=${DOCKER_USER}
-            UVICORN_HOST="0.0.0.0"
-            UVICORN_PORT=8000
-            XRAY_JSON="/var/lib/marzban/xray_config.json"
-            SQLALCHEMY_DATABASE_URL="sqlite:////var/lib/marzban/db.sqlite3"
-            EOF
-
-            # 6. Inject the Active Domain Parameters into the Copied Layout Configurations
-            sed -i "s|placeholder|$APP_DOMAIN|g" nginx/conf.d/default.conf
-
-            # 7. Safe Host Security Clearance Execution Permissions
-            sudo chmod -R 777 ./data
-
-            # 8. BOOTSTRAPPING WORKAROUND: Temporarily bypass missing SSL certificates
-            echo "Injecting clean transient HTTP bootstrap mapping layout..."
-            cat << 'EOF' > nginx/conf.d/default.conf.bootstrap
-            server {
-                listen 80;
-                server_name _;
-                location /.well-known/acme-challenge/ {
-                    root /var/www/certbot;
-                    try_files $uri =404;
-                }
-            }
-            EOF
-
-            # Swap configs to execute bootstrap initialization
-            mv nginx/conf.d/default.conf nginx/conf.d/default.conf.backup
-            mv nginx/conf.d/default.conf.bootstrap nginx/conf.d/default.conf
-
-            echo "Starting Nginx in bootstrap challenge verification state..."
-            sudo docker compose pull nginx
-            sudo docker compose up -d nginx
-            sleep 5
-
-            # Verify Nginx is running and accessible
-            echo "🔍 Verifying Nginx is accessible..."
-            if curl -s -o /dev/null -w "%{http_code}" http://localhost/.well-known/acme-challenge/ | grep -q "200\|404"; then
-              echo "✅ Nginx is responding!"
-            else
-              echo "⚠️ Nginx might not be working properly"
-              sudo docker compose logs nginx
-            fi
-
-            # Test from outside (optional)
-            echo "🔍 Testing from outside (if port is open)..."
-            curl -s -o /dev/null -w "External HTTP status: %{http_code}\n" --max-time 3 http://$VPS_IP/.well-known/acme-challenge/ || echo "⚠️ Cannot reach server from outside (firewall issue)"
-
-            # 9. Request Real Let's Encrypt Certificates via HTTP Challenge Webroot Mounts
-            echo "Requesting real Let's Encrypt certificates..."
-            sudo docker run --rm \
-              -v /etc/letsencrypt:/etc/letsencrypt \
-              -v /var/www/certbot:/var/www/certbot \
-              -v /var/lib/letsencrypt:/var/lib/letsencrypt \
-              certbot/certbot certonly --webroot \
-              --webroot-path=/var/www/certbot \
-              -d $APP_DOMAIN \
-              --email $APP_EMAIL \
-              --agree-tos \
-              --no-eff-email \
-              --non-interactive
-
-            # Restore original tracking production SSL configuration profile layout
-            mv nginx/conf.d/default.conf.backup nginx/conf.d/default.conf
-
-            # 10. Verify Production Keys are Stored on Host File Paths
-            echo "🔍 Looking for SSL certificates..."
-
-            # Check if the certificate exists in the expected location
-            EXPECTED_CERT_PATH="/etc/letsencrypt/live/$APP_DOMAIN/fullchain.pem"
-            CERT_PATH=""
-
-            if [ -f "$EXPECTED_CERT_PATH" ]; then
-              CERT_PATH="$EXPECTED_CERT_PATH"
-              echo "✅ SSL certificates found at expected location: $CERT_PATH"
-            else
-              echo "⚠️ Certificate not found at expected location: $EXPECTED_CERT_PATH"
-              echo "Looking for certificate in all Let's Encrypt directories..."
-
-              # Try to find the certificate by searching all directories
-              CERT_PATH=$(sudo find /etc/letsencrypt/live/ -name "fullchain.pem" 2>/dev/null | head -n1)
-
-              if [ -z "$CERT_PATH" ]; then
-                echo "❌ No SSL certificates found anywhere!"
-                echo "Listing all certificates in /etc/letsencrypt/live/:"
-                sudo ls -la /etc/letsencrypt/live/ || echo "Directory not found"
-                sudo find /etc/letsencrypt/live/ -type f 2>/dev/null || echo "No files found"
-                exit 1
-              else
-                echo "✅ SSL certificates found at: $CERT_PATH"
-                # Extract the domain name from the path
-                CERT_DOMAIN=$(echo $CERT_PATH | sed 's|/etc/letsencrypt/live/||' | cut -d'/' -f1)
-                echo "📝 Certificate domain: $CERT_DOMAIN"
-              fi
-            fi
-
-            # Verify the key file also exists
-            KEY_PATH=$(echo $CERT_PATH | sed 's/fullchain.pem/privkey.pem/')
-            if [ ! -f "$KEY_PATH" ]; then
-              echo "❌ SSL private key not found at: $KEY_PATH"
-              exit 1
-            fi
-            echo "✅ SSL private key found at: $KEY_PATH"
-
-            # 11. Run DB Migration Infrastructure Clearances & Boot Up Full Container Services
-            echo "Starting complete software stack..."
-            sudo docker compose down
-            sudo docker compose up -d --force-recreate --remove-orphans
-
-            # 12. Complete Core Telemetry Processing Assertions
-            sleep 10
-
-            # 13. Setup Auto-Renewal Engine Systems Cron Tab Rules
-            echo "Setting up automatic certificate renewal..."
-            (sudo crontab -l 2>/dev/null | grep -v "certbot renew" || true; echo "0 3 * * * docker run --rm -v /etc/letsencrypt:/etc/letsencrypt -v /var/www/certbot:/var/www/certbot certbot/certbot renew --quiet && docker compose exec -T nginx nginx -s reload") | sudo crontab -
-
-            # 14. Performance Telemetry Assertion Check via Local SSL Loop Request
-            echo "Performing final local health verification checks..."
-            set +e
-            HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -k https://127.0.0.1/dashboard/)
-            set -e
-
-            if [ "$HEALTH_CHECK" = "200" ] || [ "$HEALTH_CHECK" = "302" ]; then
-              echo "✅ Production services are up and running perfectly (HTTP Status: $HEALTH_CHECK)"
-            else
-              echo "⚠️ Health check returned status: ${HEALTH_CHECK:-Failed}"
-              sudo docker compose ps
-              sudo docker compose logs --tail=30 nginx
-              exit 1
-            fi
-
-            echo "====== Pipeline Processing Cycle Completed Successfully ======"
-            echo "🚀 Production panel URL is live at: https://$APP_DOMAIN/dashboard/"
